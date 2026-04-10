@@ -8,6 +8,10 @@ const LEGACY_TOURNAMENTS_TABLE =
   "ScheduleItTournaments";
 const PENDING_PLAYER_LINKS_TABLE =
   process.env.SCHEDULEIT_PENDING_PLAYER_LINKS_TABLE || "ScheduleItPendingPlayerLinks";
+const PENDING_PLAYER_LINKS_PARTITION_KEY =
+  process.env.SCHEDULEIT_PENDING_PLAYER_LINKS_PARTITION_KEY || "phoneKey";
+const PENDING_PLAYER_LINKS_SORT_KEY =
+  process.env.SCHEDULEIT_PENDING_PLAYER_LINKS_SORT_KEY || "linkKey";
 const TEAM_EVENT_CATEGORY_ID = "__team_event__";
 
 AWS.config.update({ region: REGION });
@@ -87,6 +91,8 @@ function buildLinkRows(tournament = {}) {
       const playerId = String(player?.playerId || player?.userId || playerName || phone).trim();
 
       return {
+        [PENDING_PLAYER_LINKS_PARTITION_KEY]: phone,
+        [PENDING_PLAYER_LINKS_SORT_KEY]: `${tournamentId}#${categoryId}#${playerId}`,
         phone,
         linkId: `${tournamentId}#${categoryId}#${playerId}`,
         tournamentId,

@@ -32,6 +32,10 @@ const TABLE = process.env.TOURNAMENTS_TABLE || "ScheduleItTournaments";
 const USER_DETAILS_TABLE = process.env.SCHEDULEIT_USER_DETAILS_TABLE || "scheduleit-user-details";
 const PENDING_PLAYER_LINKS_TABLE =
   process.env.SCHEDULEIT_PENDING_PLAYER_LINKS_TABLE || "ScheduleItPendingPlayerLinks";
+const PENDING_PLAYER_LINKS_PARTITION_KEY =
+  process.env.SCHEDULEIT_PENDING_PLAYER_LINKS_PARTITION_KEY || "phoneKey";
+const PENDING_PLAYER_LINKS_SORT_KEY =
+  process.env.SCHEDULEIT_PENDING_PLAYER_LINKS_SORT_KEY || "linkKey";
 const TEAM_EVENT_CATEGORY_ID = "__team_event__";
 const REGION = process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || "eu-north-1";
 AWS.config.update({ region: REGION });
@@ -228,6 +232,8 @@ function buildPendingPlayerLinks(tournament, players = []) {
       const playerId = String(player?.playerId || player?.userId || playerName || phone).trim();
 
       return {
+        [PENDING_PLAYER_LINKS_PARTITION_KEY]: phone,
+        [PENDING_PLAYER_LINKS_SORT_KEY]: `${String(tournament?.tournamentId || "").trim()}#${categoryId || TEAM_EVENT_CATEGORY_ID}#${playerId}`,
         phone,
         linkId: `${String(tournament?.tournamentId || "").trim()}#${categoryId || TEAM_EVENT_CATEGORY_ID}#${playerId}`,
         tournamentId: String(tournament?.tournamentId || "").trim(),
@@ -295,8 +301,8 @@ async function syncPendingPlayerLinksForTournament(tournament, players = []) {
         [PENDING_PLAYER_LINKS_TABLE]: chunk.map((item) => ({
           DeleteRequest: {
             Key: {
-              phone: item.phone,
-              linkId: item.linkId,
+              [PENDING_PLAYER_LINKS_PARTITION_KEY]: item[PENDING_PLAYER_LINKS_PARTITION_KEY] || item.phone,
+              [PENDING_PLAYER_LINKS_SORT_KEY]: item[PENDING_PLAYER_LINKS_SORT_KEY] || item.linkId,
             },
           },
         })),

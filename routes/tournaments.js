@@ -17,6 +17,8 @@ const TEAM_EVENT_CATEGORY_ID = "__team_event__";
 const USER_DETAILS_TABLE = process.env.SCHEDULEIT_USER_DETAILS_TABLE || "scheduleit-user-details";
 const PENDING_PLAYER_LINKS_TABLE =
   process.env.SCHEDULEIT_PENDING_PLAYER_LINKS_TABLE || "ScheduleItPendingPlayerLinks";
+const PENDING_PLAYER_LINKS_PARTITION_KEY =
+  process.env.SCHEDULEIT_PENDING_PLAYER_LINKS_PARTITION_KEY || "phoneKey";
 
 AWS.config.update({ region: REGION });
 const dynamo = new AWS.DynamoDB.DocumentClient();
@@ -126,7 +128,7 @@ async function getPendingLinkedTournamentIds(req, profile = null) {
     try {
       const result = await dynamo.query({
         TableName: PENDING_PLAYER_LINKS_TABLE,
-        KeyConditionExpression: "phone = :phone",
+        KeyConditionExpression: `${PENDING_PLAYER_LINKS_PARTITION_KEY} = :phone`,
         ExpressionAttributeValues: {
           ":phone": phone,
         },
@@ -142,7 +144,7 @@ async function getPendingLinkedTournamentIds(req, profile = null) {
       do {
         const result = await dynamo.scan({
           TableName: PENDING_PLAYER_LINKS_TABLE,
-          FilterExpression: "phone = :phone",
+          FilterExpression: `${PENDING_PLAYER_LINKS_PARTITION_KEY} = :phone`,
           ExpressionAttributeValues: {
             ":phone": phone,
           },
