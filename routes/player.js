@@ -78,6 +78,22 @@ function normalizeCategories(cats) {
   return [];
 }
 
+function getTieCategoryDefinitions(tournament) {
+  const categories = normalizeCategories(tournament?.categories).map(normalizeCategoryItem);
+  if (categories.length) return categories;
+
+  const requestedCount = Math.max(
+    1,
+    Number(tournament?.advancedSettings?.tieSubmatchCount || 1) || 1
+  );
+
+  return Array.from({ length: requestedCount }, (_, index) => ({
+    categoryId: `CAT-${index + 1}`,
+    eventName: `Category ${index + 1}`,
+    teamSize: 1,
+  }));
+}
+
 function normalizeCategoryItem(c, index = 0) {
   const raw = c && typeof c === "object" ? c : {};
   return {
@@ -773,6 +789,48 @@ function getCurrentUserTeamNames(tournament, req, profile = null, pendingLinks =
   return values;
 }
 
+function buildSyntheticSubmatchesFromLineups(tournament, match) {
+  const stored = asArray(match?.submatches);
+  if (stored.length) return stored;
+
+  const defs = getTieCategoryDefinitions(tournament);
+  const homeAssignments = asArray(match?.lineups?.home?.assignments);
+  const awayAssignments = asArray(match?.lineups?.away?.assignments);
+  const count = Math.max(defs.length, homeAssignments.length, awayAssignments.length, 0);
+  if (!count) return [];
+
+  return Array.from({ length: count }, (_, index) => {
+    const def = defs[index] || {
+      categoryId: `CAT-${index + 1}`,
+      eventName: `Category ${index + 1}`,
+    };
+    const homeAssignment = homeAssignments.find((item) => Number(item?.scoreIndex) === index) || homeAssignments[index] || {};
+    const awayAssignment = awayAssignments.find((item) => Number(item?.scoreIndex) === index) || awayAssignments[index] || {};
+    const homePlayers = asArray(homeAssignment?.players).map((player) =>
+      typeof player === "object"
+        ? String(player?.playerName || player?.name || player?.username || "").trim()
+        : String(player || "").trim()
+    ).filter(Boolean);
+    const awayPlayers = asArray(awayAssignment?.players).map((player) =>
+      typeof player === "object"
+        ? String(player?.playerName || player?.name || player?.username || "").trim()
+        : String(player || "").trim()
+    ).filter(Boolean);
+
+    return {
+      categoryId: String(def?.categoryId || `CAT-${index + 1}`).trim(),
+      categoryName: String(def?.eventName || def?.categoryId || `Category ${index + 1}`).trim(),
+      eventName: String(def?.eventName || def?.categoryId || `Category ${index + 1}`).trim(),
+      label: String(def?.eventName || def?.categoryId || `Category ${index + 1}`).trim(),
+      homePlayers,
+      awayPlayers,
+      score: null,
+      winnerSide: null,
+      synthesizedFromLineups: true,
+    };
+  });
+}
+
 function getDisplayScoreForSide(match, side = "home") {
   const isAway = String(side).toLowerCase() === "away";
   const direct = isAway ? match?.score?.state?.B : match?.score?.state?.A;
@@ -943,7 +1001,7 @@ function buildMyMatches(tournament, req, profile = null, pendingLinks = []) {
       asArray(round).forEach((match, matchIndex) => {
         const myNames = getCurrentUserMatchNamesWithPendingLinks(tournament, req, profile, pendingLinks);
         const myTeamNames = getCurrentUserTeamNames(tournament, req, profile, pendingLinks);
-        const submatches = asArray(match?.submatches).map((submatch, submatchIndex) => {
+        const submatches = buildSyntheticSubmatchesFromLineups(tournament, match).map((submatch, submatchIndex) => {
           const homeMine = asArray(submatch?.homePlayers).some((player) => myNames.has(normalizeText(player)));
           const awayMine = asArray(submatch?.awayPlayers).some((player) => myNames.has(normalizeText(player)));
           return {
