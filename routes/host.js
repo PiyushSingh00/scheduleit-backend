@@ -3,6 +3,13 @@ const { v4: uuid } = require("uuid");
 const AWS = require("aws-sdk");
 const { requireAuth } = require("../middleware/auth");
 
+const {
+  getTournamentAggregate,
+  listTournamentAggregates,
+  saveTournamentAggregate,
+  updateTournamentAggregateFields,
+} = require("../repositories/tournamentStore");
+
 let OpenAI = null;
 try {
   OpenAI = require("openai");
@@ -169,8 +176,7 @@ function getCategoryMeta(tournament, categoryId) {
 }
 
 async function getTournament(tournamentId) {
-  const result = await dynamo.get({ TableName: TABLE, Key: { tournamentId } }).promise();
-  return result.Item || null;
+  return getTournamentAggregate(tournamentId);
 }
 
 function assertOwner(req, tournament, res) {
@@ -1592,11 +1598,7 @@ async function buildSuggestedSchema(tournament, requestBody = {}) {
 }
 
 async function updateTournamentFields(tournamentId, fields) {
-  const item = await getTournament(tournamentId);
-  if (!item) return null;
-  const next = { ...item, ...fields, updatedAt: nowIso() };
-  await dynamo.put({ TableName: TABLE, Item: next }).promise();
-  return next;
+  return updateTournamentAggregateFields(tournamentId, fields);
 }
 
 function getLineupsForResponse(tournament, req, categoryId) {
@@ -1710,7 +1712,7 @@ router.post("/tournaments", requireAuth, async (req, res) => {
       lastSavedPayload: cloneJson(body),
     };
 
-    await dynamo.put({ TableName: TABLE, Item: item }).promise();
+    await saveTournamentAggregate(item);
     return res.json({ ok: true, tournamentId, tournament: item });
   } catch (err) {
     console.error("Create tournament error:", err);
@@ -1720,8 +1722,8 @@ router.post("/tournaments", requireAuth, async (req, res) => {
 
 router.get("/tournaments", requireAuth, async (req, res) => {
   try {
-    const result = await dynamo.scan({ TableName: TABLE }).promise();
-    const mine = asArray(result.Items).filter((t) => isOwner(req, t));
+    const items = await listTournamentAggregates();
+    const mine = asArray(items).filter((t) => isOwner(req, t));
     return res.json(mine);
   } catch (err) {
     console.error("Fetch host tournaments error:", err);
@@ -1797,7 +1799,7 @@ router.put("/tournaments/:tournamentId", requireAuth, async (req, res) => {
       lastSavedPayload: cloneJson(body),
     };
 
-    await dynamo.put({ TableName: TABLE, Item: next }).promise();
+    await saveTournamentAggregate(next);
     return res.json({ ok: true, tournament: next });
   } catch (err) {
     console.error("Update tournament error:", err);
@@ -1819,15 +1821,9 @@ router.patch("/tournaments/:tournamentId/registrations-open", requireAuth, async
 });
 
 router.delete("/tournaments/:tournamentId", requireAuth, async (req, res) => {
-  try {
-    const tournament = await getTournament(req.params.tournamentId);
-    if (!assertOwner(req, tournament, res)) return;
-    await dynamo.delete({ TableName: TABLE, Key: { tournamentId: req.params.tournamentId } }).promise();
-    return res.json({ ok: true });
-  } catch (err) {
-    console.error("Delete tournament error:", err);
-    return res.status(500).json({ message: "Failed to delete tournament" });
-  }
+  return res.status(503).json({
+    message: "Tournament delete temporarily disabled during migration"
+  });
 });
 
 // -----------------------------------------------------------------------------
@@ -1990,7 +1986,7 @@ async function handleHostAddUmpire(req, res) {
     tournament.umpires = umpires;
     tournament.updatedAt = nowIso();
 
-    await dynamo.put({ TableName: TABLE, Item: tournament }).promise();
+    await saveTournamentAggregate(tournament);
 
     return res.json({
       ok: true,
