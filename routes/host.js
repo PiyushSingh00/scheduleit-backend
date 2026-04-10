@@ -3323,7 +3323,7 @@ router.post("/tournaments/:tournamentId/scoring-schema/add-field", requireAuth, 
 router.put("/tournaments/:tournamentId/matches/score", requireAuth, async (req, res) => {
   try {
     const tournament = await getTournament(req.params.tournamentId);
-    if (!assertOwner(req, tournament, res)) return;
+    if (!(await assertOwnerOrUmpire(req, tournament, res))) return;
 
     const categoryId = resolveCategoryId(tournament, req.body?.categoryId, { preferSyntheticForTeam: true });
     const roundIndex = req.body?.roundIndex ?? req.body?.round;
