@@ -16,6 +16,10 @@ const TABLE = process.env.SCHEDULEIT_TOURNAMENTS_TABLE || "ScheduleItTournaments
 const TEAM_EVENT_CATEGORY_ID = "__team_event__";
 
 const USER_DETAILS_TABLE = process.env.SCHEDULEIT_USER_DETAILS_TABLE || "scheduleit-user-details";
+const PENDING_PLAYER_LINKS_TABLE =
+  process.env.SCHEDULEIT_PENDING_PLAYER_LINKS_TABLE || "ScheduleItPendingPlayerLinks";
+const PENDING_PLAYER_LINKS_PARTITION_KEY =
+  process.env.SCHEDULEIT_PENDING_PLAYER_LINKS_PARTITION_KEY || "phoneKey";
 
 AWS.config.update({ region: REGION });
 const ddb = new AWS.DynamoDB.DocumentClient();
@@ -124,6 +128,39 @@ function normalizePhone(value) {
   if (!digits) return "";
   if (digits.length === 10) return `91${digits}`;
   return digits;
+}
+
+async function getPendingLinkedTournamentIds(req, profile = null) {
+  const phone = normalizePhone(
+    profile?.phone ||
+    profile?.phoneNumber ||
+    profile?.mobile ||
+    req.user?.phone ||
+    req.user?.phoneNumber ||
+    req.user?.mobile ||
+    ""
+  );
+
+  if (!phone) return new Set();
+
+  try {
+    const result = await ddb.query({
+      TableName: PENDING_PLAYER_LINKS_TABLE,
+      KeyConditionExpression: `${PENDING_PLAYER_LINKS_PARTITION_KEY} = :phone`,
+      ExpressionAttributeValues: {
+        ":phone": phone,
+      },
+    }).promise();
+
+    return new Set(
+      asArray(result.Items)
+        .map((item) => String(item?.tournamentId || "").trim())
+        .filter(Boolean)
+    );
+  } catch (err) {
+    console.warn("Could not load pending player links in player route:", err?.message || err);
+    return new Set();
+  }
 }
 
 async function getCurrentUserProfile(req) {
@@ -951,9 +988,12 @@ function upsertRegisteredPlayerForAcceptedInvite(tournament, req, request, invit
   return players;
 }
 
-function buildMyTournamentList(items, req, profile = null) {
+function buildMyTournamentList(items, req, profile = null, linkedTournamentIds = new Set()) {
   return items
     .filter((tournament) => {
+      const linked = linkedTournamentIds.has(String(tournament?.tournamentId || "").trim());
+      if (linked) return true;
+
       const registered = getPlayers(tournament).some((player) =>
         playerBelongsToCurrentUser(player, req, profile)
       );
@@ -1148,6 +1188,7 @@ router.get("/tournaments", requireAuth, async (req, res) => {
   try {
     const all = await listTournamentAggregates();
     const profile = await getCurrentUserProfile(req);
+    const linkedTournamentIds = await getPendingLinkedTournamentIds(req, profile);
 
     const reconciledItems = [];
     for (const item of asArray(all)) {
@@ -1156,7 +1197,7 @@ router.get("/tournaments", requireAuth, async (req, res) => {
       reconciledItems.push(reconciled);
     }
 
-    const rows = buildMyTournamentList(reconciledItems, req, profile);
+    const rows = buildMyTournamentList(reconciledItems, req, profile, linkedTournamentIds);
     return res.json(rows);
   } catch (err) {
     console.error("GET /api/player/tournaments error:", err);
