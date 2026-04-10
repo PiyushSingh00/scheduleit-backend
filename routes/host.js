@@ -11,7 +11,9 @@ const {
   updateTournamentMetaFields,
   extractMatchRowsFromFixtures,
   putTournamentMatches,
+  putTournamentMatchRowsConditionally,
   deleteTournamentMatchRows,
+  deleteTournamentMatchRowsConditionally,
   USE_SPLIT_TABLES,
   deleteTournamentAggregate,
 } = require("../repositories/tournamentStore");
@@ -1652,8 +1654,12 @@ async function persistScoredFixtures(tournament, fixtures, fields = {}) {
     if (!nextByKey.has(key)) rowsToDelete.push(row);
   });
 
-  if (rowsToDelete.length) await deleteTournamentMatchRows(rowsToDelete);
-  if (rowsToPut.length) await putTournamentMatches(rowsToPut);
+  if (rowsToDelete.length) {
+    await deleteTournamentMatchRowsConditionally(rowsToDelete, currentByKey);
+  }
+  if (rowsToPut.length) {
+    await putTournamentMatchRowsConditionally(rowsToPut, currentByKey);
+  }
 
   const metaFields = cloneJson(fields || {});
   const metaUpdated = await updateTournamentMetaFields(tournament.tournamentId, metaFields);
@@ -3397,6 +3403,11 @@ router.put("/tournaments/:tournamentId/matches/score", requireAuth, async (req, 
     });
   } catch (err) {
     console.error("Save match score error:", err);
+    if (err?.code === "ConditionalCheckFailedException") {
+      return res.status(409).json({
+        message: "This match was updated from another device. Refresh and try again.",
+      });
+    }
     return res.status(500).json({ message: "Server error" });
   }
 });

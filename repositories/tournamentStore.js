@@ -418,6 +418,33 @@ async function putTournamentMatches(matchRows) {
   return rows.length;
 }
 
+async function putTournamentMatchRowsConditionally(matchRows, previousRowsByKey = new Map()) {
+  const rows = asArray(matchRows);
+  if (!rows.length) return 0;
+
+  for (const row of rows) {
+    const key = String(row?.matchKey || '').trim();
+    const previous = previousRowsByKey instanceof Map ? previousRowsByKey.get(key) : null;
+
+    const params = {
+      TableName: MATCH_TABLE,
+      Item: row,
+    };
+
+    if (previous) {
+      params.ConditionExpression = '#updatedAt = :expectedUpdatedAt';
+      params.ExpressionAttributeNames = { '#updatedAt': 'updatedAt' };
+      params.ExpressionAttributeValues = { ':expectedUpdatedAt': previous.updatedAt ?? null };
+    } else {
+      params.ConditionExpression = 'attribute_not_exists(tournamentId) AND attribute_not_exists(matchKey)';
+    }
+
+    await ddb.put(params).promise();
+  }
+
+  return rows.length;
+}
+
 async function deleteTournamentMatchRows(matchRows) {
   const rows = asArray(matchRows);
   if (!rows.length) return 0;
@@ -433,6 +460,29 @@ async function deleteTournamentMatchRows(matchRows) {
       })),
     });
   }
+  return rows.length;
+}
+
+async function deleteTournamentMatchRowsConditionally(matchRows, previousRowsByKey = new Map()) {
+  const rows = asArray(matchRows);
+  if (!rows.length) return 0;
+
+  for (const row of rows) {
+    const key = String(row?.matchKey || '').trim();
+    const previous = previousRowsByKey instanceof Map ? previousRowsByKey.get(key) : row;
+
+    await ddb.delete({
+      TableName: MATCH_TABLE,
+      Key: {
+        tournamentId: previous.tournamentId,
+        matchKey: previous.matchKey,
+      },
+      ConditionExpression: '#updatedAt = :expectedUpdatedAt',
+      ExpressionAttributeNames: { '#updatedAt': 'updatedAt' },
+      ExpressionAttributeValues: { ':expectedUpdatedAt': previous.updatedAt ?? null },
+    }).promise();
+  }
+
   return rows.length;
 }
 
@@ -600,7 +650,9 @@ module.exports = {
   queryTournamentMatches,
   deleteTournamentMatches,
   deleteTournamentMatchRows,
+  deleteTournamentMatchRowsConditionally,
   putTournamentMatches,
+  putTournamentMatchRowsConditionally,
   replaceTournamentMatches,
   getTournamentAggregate,
   listTournamentAggregates,
