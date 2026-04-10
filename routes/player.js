@@ -3,6 +3,12 @@ const AWS = require("aws-sdk");
 const { randomUUID } = require("crypto");
 const { requireAuth } = require("../middleware/auth");
 
+const {
+  getTournamentAggregate,
+  listTournamentAggregates,
+  saveTournamentAggregate,
+} = require("../repositories/tournamentStore");
+
 const router = express.Router();
 
 const REGION = process.env.AWS_REGION || "eu-north-1";
@@ -110,8 +116,7 @@ function getCategoryMeta(tournament, categoryId) {
 }
 
 async function getTournament(tournamentId) {
-  const result = await ddb.get({ TableName: TABLE, Key: { tournamentId } }).promise();
-  return result.Item || null;
+  return getTournamentAggregate(tournamentId);
 }
 
 function normalizePhone(value) {
@@ -403,8 +408,7 @@ async function reconcileTournamentUmpiresForCurrentUser(tournament, req, profile
 }
 
 async function putTournament(item) {
-  await ddb.put({ TableName: TABLE, Item: item }).promise();
-  return item;
+  return saveTournamentAggregate(item);
 }
 
 function getPlayers(tournament) {
@@ -912,15 +916,15 @@ router.post("/tournaments/:tournamentId/leave", requireAuth, async (req, res) =>
 
 router.get("/tournaments", requireAuth, async (req, res) => {
   try {
-    const scan = await ddb.scan({ TableName: TABLE }).promise();
+    const all = await listTournamentAggregates();
     const profile = await getCurrentUserProfile(req);
 
     const reconciledItems = [];
-for (const item of asArray(scan.Items)) {
-  const reconciledPlayers = await reconcileTournamentPlayersForCurrentUser(item, req, profile);
-  const reconciled = await reconcileTournamentUmpiresForCurrentUser(reconciledPlayers, req, profile);
-  reconciledItems.push(reconciled);
-}
+    for (const item of asArray(all)) {
+      const reconciledPlayers = await reconcileTournamentPlayersForCurrentUser(item, req, profile);
+      const reconciled = await reconcileTournamentUmpiresForCurrentUser(reconciledPlayers, req, profile);
+      reconciledItems.push(reconciled);
+    }
 
     const rows = buildMyTournamentList(reconciledItems, req, profile);
     return res.json(rows);
@@ -932,9 +936,9 @@ for (const item of asArray(scan.Items)) {
 
 router.get("/team-requests", requireAuth, async (req, res) => {
   try {
-    const scan = await ddb.scan({ TableName: TABLE }).promise();
+    const all = await listTournamentAggregates();
     const profile = await getCurrentUserProfile(req);
-    const requests = getMyVisibleTeamRequests(asArray(scan.Items), req, profile);
+    const requests = getMyVisibleTeamRequests(asArray(all), req, profile);
     return res.json(requests);
   } catch (err) {
     console.error("GET /api/player/team-requests error:", err);

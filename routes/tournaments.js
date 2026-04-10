@@ -3,6 +3,12 @@ const AWS = require("aws-sdk");
 const { v4: uuid } = require("uuid");
 const { requireAuth } = require("../middleware/auth");
 
+const {
+  getTournamentAggregate,
+  listTournamentAggregates,
+  saveTournamentAggregate,
+} = require("../repositories/tournamentStore");
+
 const router = express.Router();
 
 const REGION = process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || "eu-north-1";
@@ -520,14 +526,11 @@ function tournamentIncludesUser(tournament, req) {
 }
 
 async function getTournament(tournamentId) {
-  const result = await dynamo.get({ TableName: TABLE, Key: { tournamentId } }).promise();
-  return result.Item || null;
+  return getTournamentAggregate(tournamentId);
 }
 
 async function saveTournament(tournament) {
-  const item = { ...cloneJson(tournament), updatedAt: nowIso() };
-  await dynamo.put({ TableName: TABLE, Item: item }).promise();
-  return item;
+  return saveTournamentAggregate({ ...cloneJson(tournament), updatedAt: nowIso() });
 }
 
 function validatePrivateCodeIfNeeded(tournament, incomingCode) {
@@ -548,8 +551,8 @@ router.post("/lookup-by-code", async (req, res) => {
     const code = String(req.body?.code || "").trim().toUpperCase();
     if (!code) return res.status(400).json({ message: "code is required" });
 
-    const scan = await dynamo.scan({ TableName: TABLE }).promise();
-    const item = asArray(scan.Items).find((t) => String(t?.accessCode || "").trim().toUpperCase() === code);
+    const all = await listTournamentAggregates();
+    const item = asArray(all).find((t) => String(t?.accessCode || "").trim().toUpperCase() === code);
     if (!item) return res.status(404).json({ message: "Tournament not found for this code" });
     if (item.registrationsOpen === false) return res.status(409).json({ message: "Registrations are closed" });
 
@@ -569,8 +572,8 @@ router.post("/validate-code", async (req, res) => {
     if (tournamentId) {
       tournament = await getTournament(tournamentId);
     } else if (code) {
-      const scan = await dynamo.scan({ TableName: TABLE }).promise();
-      tournament = asArray(scan.Items).find((t) => String(t?.accessCode || "").trim().toUpperCase() === code.toUpperCase()) || null;
+      const all = await listTournamentAggregates();
+      tournament = asArray(all).find((t) => String(t?.accessCode || "").trim().toUpperCase() === code.toUpperCase()) || null;
     }
 
     if (!tournament) return res.status(404).json({ message: "Tournament not found" });
@@ -596,8 +599,8 @@ router.post("/validate-code", async (req, res) => {
 // -----------------------------------------------------------------------------
 router.get("/", async (req, res) => {
   try {
-    const result = await dynamo.scan({ TableName: TABLE }).promise();
-    const items = asArray(result.Items)
+    const all = await listTournamentAggregates();
+    const items = asArray(all)
       .sort((a, b) => String(b?.createdAt || "").localeCompare(String(a?.createdAt || "")))
       .map((t) => buildPublicTournamentView(t));
 
@@ -610,8 +613,8 @@ router.get("/", async (req, res) => {
 
 router.get("/mine", requireAuth, async (req, res) => {
   try {
-    const result = await dynamo.scan({ TableName: TABLE }).promise();
-    const items = asArray(result.Items)
+    const all = await listTournamentAggregates();
+    const items = asArray(all)
       .filter((t) => tournamentIncludesUser(t, req))
       .sort((a, b) => String(b?.createdAt || "").localeCompare(String(a?.createdAt || "")))
       .map((t) => buildPublicTournamentView(t, { includeAccessCode: true }));
