@@ -418,6 +418,24 @@ async function putTournamentMatches(matchRows) {
   return rows.length;
 }
 
+async function deleteTournamentMatchRows(matchRows) {
+  const rows = asArray(matchRows);
+  if (!rows.length) return 0;
+  for (const batch of chunk(rows, 25)) {
+    await batchWriteWithRetry({
+      [MATCH_TABLE]: batch.map((row) => ({
+        DeleteRequest: {
+          Key: {
+            tournamentId: row.tournamentId,
+            matchKey: row.matchKey,
+          },
+        },
+      })),
+    });
+  }
+  return rows.length;
+}
+
 async function replaceTournamentMatches(tournamentId, fixtures, options = {}) {
   const updatedAt = options.updatedAt || nowIso();
   const createdAt = options.createdAt || updatedAt;
@@ -506,6 +524,23 @@ async function updateTournamentAggregateFields(tournamentId, fields) {
   return saveTournamentAggregate(next);
 }
 
+async function updateTournamentMetaFields(tournamentId, fields) {
+  if (!USE_SPLIT_TABLES) {
+    return updateTournamentAggregateFields(tournamentId, fields);
+  }
+
+  const current = await getTournamentMeta(tournamentId);
+  if (!current) return null;
+
+  const next = {
+    ...cloneJson(current),
+    ...cloneJson(fields || {}),
+    updatedAt: nowIso(),
+  };
+
+  return saveTournamentMeta(next);
+}
+
 module.exports = {
   REGION,
   LEGACY_TABLE,
@@ -532,10 +567,12 @@ module.exports = {
   saveTournamentMeta,
   queryTournamentMatches,
   deleteTournamentMatches,
+  deleteTournamentMatchRows,
   putTournamentMatches,
   replaceTournamentMatches,
   getTournamentAggregate,
   listTournamentAggregates,
   saveTournamentAggregate,
   updateTournamentAggregateFields,
+  updateTournamentMetaFields,
 };

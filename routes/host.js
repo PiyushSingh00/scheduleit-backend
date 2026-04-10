@@ -8,6 +8,11 @@ const {
   listTournamentAggregates,
   saveTournamentAggregate,
   updateTournamentAggregateFields,
+  updateTournamentMetaFields,
+  extractMatchRowsFromFixtures,
+  putTournamentMatches,
+  deleteTournamentMatchRows,
+  USE_SPLIT_TABLES,
 } = require("../repositories/tournamentStore");
 
 let OpenAI = null;
@@ -1599,6 +1604,71 @@ async function buildSuggestedSchema(tournament, requestBody = {}) {
 
 async function updateTournamentFields(tournamentId, fields) {
   return updateTournamentAggregateFields(tournamentId, fields);
+}
+
+function mapRowsByMatchKey(rows) {
+  const map = new Map();
+  asArray(rows).forEach((row) => {
+    const key = String(row?.matchKey || "").trim();
+    if (key) map.set(key, row);
+  });
+  return map;
+}
+
+function rowsEqual(a, b) {
+  return JSON.stringify(a || null) === JSON.stringify(b || null);
+}
+
+async function persistScoredFixtures(tournament, fixtures, fields = {}) {
+  if (!USE_SPLIT_TABLES) {
+    return updateTournamentFields(tournament.tournamentId, {
+      ...fields,
+      fixtures,
+    });
+  }
+
+  const currentRows = extractMatchRowsFromFixtures(tournament.tournamentId, tournament.fixtures || { categories: {} }, {
+    createdAt: tournament.createdAt || nowIso(),
+    updatedAt: tournament.updatedAt || nowIso(),
+  });
+
+  const nextRows = extractMatchRowsFromFixtures(tournament.tournamentId, fixtures || { categories: {} }, {
+    createdAt: tournament.createdAt || nowIso(),
+    updatedAt: nowIso(),
+  });
+
+  const currentByKey = mapRowsByMatchKey(currentRows);
+  const nextByKey = mapRowsByMatchKey(nextRows);
+
+  const rowsToPut = [];
+  const rowsToDelete = [];
+
+  nextByKey.forEach((row, key) => {
+    if (!rowsEqual(currentByKey.get(key), row)) rowsToPut.push(row);
+  });
+
+  currentByKey.forEach((row, key) => {
+    if (!nextByKey.has(key)) rowsToDelete.push(row);
+  });
+
+  if (rowsToDelete.length) await deleteTournamentMatchRows(rowsToDelete);
+  if (rowsToPut.length) await putTournamentMatches(rowsToPut);
+
+  const metaFields = cloneJson(fields || {});
+  const metaUpdated = await updateTournamentMetaFields(tournament.tournamentId, metaFields);
+  if (!metaUpdated) {
+    return updateTournamentFields(tournament.tournamentId, {
+      ...metaFields,
+      fixtures,
+    });
+  }
+
+  return {
+    ...cloneJson(tournament),
+    ...cloneJson(metaFields),
+    fixtures: normalizeFixtures(fixtures || { categories: {} }),
+    updatedAt: nowIso(),
+  };
 }
 
 function getLineupsForResponse(tournament, req, categoryId) {
@@ -3253,7 +3323,7 @@ router.post("/tournaments/:tournamentId/scoring-schema/add-field", requireAuth, 
 router.put("/tournaments/:tournamentId/matches/score", requireAuth, async (req, res) => {
   try {
     const tournament = await getTournament(req.params.tournamentId);
-    if (!assertOwner(req, tournament, res)) return;
+    if (!(await assertOwnerOrUmpire(req, tournament, res))) return;
 
     const categoryId = resolveCategoryId(tournament, req.body?.categoryId, { preferSyntheticForTeam: true });
     const roundIndex = req.body?.roundIndex ?? req.body?.round;
@@ -3302,8 +3372,7 @@ router.put("/tournaments/:tournamentId/matches/score", requireAuth, async (req, 
     const progressionOut = appendKnockoutRoundsIfNeeded(tournament, categoryId, fixtures);
     const rows = computeLeaderboardRows(tournament, categoryId, progressionOut.fixtures);
 
-    const updated = await updateTournamentFields(req.params.tournamentId, {
-      fixtures: progressionOut.fixtures,
+    const updated = await persistScoredFixtures(tournament, progressionOut.fixtures, {
       leaderboardSnapshotByCategory: {
         ...(tournament.leaderboardSnapshotByCategory || {}),
         [categoryId]: rows,
