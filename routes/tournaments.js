@@ -15,6 +15,8 @@ const REGION = process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || "eu-n
 const TABLE = process.env.TOURNAMENTS_TABLE || "ScheduleItTournaments";
 const TEAM_EVENT_CATEGORY_ID = "__team_event__";
 const USER_DETAILS_TABLE = process.env.SCHEDULEIT_USER_DETAILS_TABLE || "scheduleit-user-details";
+const PENDING_PLAYER_LINKS_TABLE =
+  process.env.SCHEDULEIT_PENDING_PLAYER_LINKS_TABLE || "ScheduleItPendingPlayerLinks";
 
 AWS.config.update({ region: REGION });
 const dynamo = new AWS.DynamoDB.DocumentClient();
@@ -102,6 +104,61 @@ async function getCurrentUserProfile(req) {
   } catch (err) {
     console.warn("Could not load current user profile in tournaments route:", err?.message || err);
     return null;
+  }
+}
+
+async function getPendingLinkedTournamentIds(req, profile = null) {
+  const phone = normalizePhone(
+    profile?.phone ||
+    profile?.phoneNumber ||
+    profile?.mobile ||
+    req.user?.phone ||
+    req.user?.phoneNumber ||
+    req.user?.mobile ||
+    ""
+  );
+
+  if (!phone) return new Set();
+
+  try {
+    let items = [];
+
+    try {
+      const result = await dynamo.query({
+        TableName: PENDING_PLAYER_LINKS_TABLE,
+        KeyConditionExpression: "phone = :phone",
+        ExpressionAttributeValues: {
+          ":phone": phone,
+        },
+      }).promise();
+      items = asArray(result.Items);
+    } catch (err) {
+      const message = String(err?.message || "");
+      if (!/Query condition missed key schema element|ValidationException/i.test(message)) {
+        throw err;
+      }
+
+      let ExclusiveStartKey;
+      do {
+        const result = await dynamo.scan({
+          TableName: PENDING_PLAYER_LINKS_TABLE,
+          FilterExpression: "phone = :phone",
+          ExpressionAttributeValues: {
+            ":phone": phone,
+          },
+          ExclusiveStartKey,
+        }).promise();
+        items.push(...asArray(result.Items));
+        ExclusiveStartKey = result.LastEvaluatedKey;
+      } while (ExclusiveStartKey);
+    }
+
+    return new Set(
+      items.map((item) => String(item?.tournamentId || "").trim()).filter(Boolean)
+    );
+  } catch (err) {
+    console.warn("Could not load pending player links:", err?.message || err);
+    return new Set();
   }
 }
 
@@ -683,8 +740,12 @@ router.get("/mine", requireAuth, async (req, res) => {
   try {
     const all = await listTournamentAggregates();
     const profile = await getCurrentUserProfile(req);
+    const linkedTournamentIds = await getPendingLinkedTournamentIds(req, profile);
     const items = asArray(all)
-      .filter((t) => tournamentIncludesUser(t, req, profile))
+      .filter((t) =>
+        linkedTournamentIds.has(String(t?.tournamentId || "").trim()) ||
+        tournamentIncludesUser(t, req, profile)
+      )
       .sort((a, b) => String(b?.createdAt || "").localeCompare(String(a?.createdAt || "")))
       .map((t) => buildPublicTournamentView(t, { includeAccessCode: true }));
 

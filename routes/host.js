@@ -30,6 +30,8 @@ const dynamo = new AWS.DynamoDB.DocumentClient();
 
 const TABLE = process.env.TOURNAMENTS_TABLE || "ScheduleItTournaments";
 const USER_DETAILS_TABLE = process.env.SCHEDULEIT_USER_DETAILS_TABLE || "scheduleit-user-details";
+const PENDING_PLAYER_LINKS_TABLE =
+  process.env.SCHEDULEIT_PENDING_PLAYER_LINKS_TABLE || "ScheduleItPendingPlayerLinks";
 const TEAM_EVENT_CATEGORY_ID = "__team_event__";
 const REGION = process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || "eu-north-1";
 AWS.config.update({ region: REGION });
@@ -204,6 +206,114 @@ function normalizePhone(value) {
   if (!digits) return "";
   if (digits.length === 10) return `91${digits}`;
   return digits;
+}
+
+function isPendingLinkEligiblePlayer(player = {}) {
+  const phone = normalizePhone(player?.phone || player?.playerPhone || "");
+  const status = normalizeText(player?.status || player?.registrationStatus || "accepted");
+  return Boolean(phone) && ["accepted", "approved", "active", ""].includes(status);
+}
+
+function buildPendingPlayerLinks(tournament, players = []) {
+  return asArray(players)
+    .filter(isPendingLinkEligiblePlayer)
+    .map((player) => {
+      const phone = normalizePhone(player?.phone || player?.playerPhone || "");
+      const categoryId = String(
+        player?.categoryId ||
+        (isTeamTournament(tournament) ? TEAM_EVENT_CATEGORY_ID : "")
+      ).trim();
+      const playerName = String(player?.playerName || player?.name || "").trim();
+      const source = String(player?.source || player?.registeredVia || "").trim() || "host_player";
+      const playerId = String(player?.playerId || player?.userId || playerName || phone).trim();
+
+      return {
+        phone,
+        linkId: `${String(tournament?.tournamentId || "").trim()}#${categoryId || TEAM_EVENT_CATEGORY_ID}#${playerId}`,
+        tournamentId: String(tournament?.tournamentId || "").trim(),
+        tournamentName: String(tournament?.tournamentName || "").trim(),
+        hostUsername: String(tournament?.hostUsername || "").trim(),
+        playerId,
+        userId: String(player?.userId || "").trim() || null,
+        username: String(player?.username || "").trim(),
+        playerName,
+        categoryId: categoryId || TEAM_EVENT_CATEGORY_ID,
+        age: player?.age != null && player?.age !== "" ? Number(player.age) : null,
+        gender: String(player?.gender || "").trim(),
+        status: String(player?.status || player?.registrationStatus || "accepted").trim() || "accepted",
+        source,
+        createdAt: String(player?.createdAt || tournament?.createdAt || nowIso()).trim() || nowIso(),
+        updatedAt: nowIso(),
+      };
+    });
+}
+
+async function batchWriteAll(requestItems) {
+  let pending = requestItems;
+
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const result = await dynamo.batchWrite({ RequestItems: pending }).promise();
+    const next = result.UnprocessedItems || {};
+    const hasUnprocessed = Object.values(next).some((rows) => Array.isArray(rows) && rows.length);
+    if (!hasUnprocessed) return;
+    pending = next;
+    await new Promise((resolve) => setTimeout(resolve, 100 * (attempt + 1)));
+  }
+
+  throw new Error("Pending player links batch write still has unprocessed items");
+}
+
+async function queryPendingLinksByTournamentId(tournamentId) {
+  const items = [];
+  let ExclusiveStartKey;
+
+  do {
+    const result = await dynamo.scan({
+      TableName: PENDING_PLAYER_LINKS_TABLE,
+      FilterExpression: "tournamentId = :tid",
+      ExpressionAttributeValues: { ":tid": String(tournamentId || "").trim() },
+      ExclusiveStartKey,
+    }).promise();
+
+    items.push(...asArray(result.Items));
+    ExclusiveStartKey = result.LastEvaluatedKey;
+  } while (ExclusiveStartKey);
+
+  return items;
+}
+
+async function syncPendingPlayerLinksForTournament(tournament, players = []) {
+  if (!tournament?.tournamentId) return;
+
+  const existing = await queryPendingLinksByTournamentId(tournament.tournamentId);
+  const nextLinks = buildPendingPlayerLinks(tournament, players);
+
+  if (existing.length) {
+    for (let i = 0; i < existing.length; i += 25) {
+      const chunk = existing.slice(i, i + 25);
+      await batchWriteAll({
+        [PENDING_PLAYER_LINKS_TABLE]: chunk.map((item) => ({
+          DeleteRequest: {
+            Key: {
+              phone: item.phone,
+              linkId: item.linkId,
+            },
+          },
+        })),
+      });
+    }
+  }
+
+  if (nextLinks.length) {
+    for (let i = 0; i < nextLinks.length; i += 25) {
+      const chunk = nextLinks.slice(i, i + 25);
+      await batchWriteAll({
+        [PENDING_PLAYER_LINKS_TABLE]: chunk.map((item) => ({
+          PutRequest: { Item: item },
+        })),
+      });
+    }
+  }
 }
 
 function getTournamentUmpires(tournament) {
@@ -2009,7 +2119,8 @@ router.delete("/tournaments/:tournamentId", requireAuth, async (req, res) => {
     if (!assertOwner(req, tournament, res)) return;
 
     const result = await deleteTournamentAggregate(req.params.tournamentId);
-    return res.json({ ok: true, ...result });
+    await syncPendingPlayerLinksForTournament({ tournamentId: req.params.tournamentId }, []);
+    return res.json({ ok: true, ...result, removedPendingLinks: true });
   } catch (err) {
     console.error("Delete tournament error:", err);
     return res.status(500).json({ message: "Failed to delete tournament" });
@@ -2261,7 +2372,9 @@ function hostPlayerMatches(existing = {}, incoming = {}, tournament) {
 }
 
 async function savePlayers(tournamentId, players, extra = {}) {
-  return updateTournamentFields(tournamentId, { players, ...extra });
+  const updated = await updateTournamentFields(tournamentId, { players, ...extra });
+  await syncPendingPlayerLinksForTournament(updated || { tournamentId }, players);
+  return updated;
 }
 
 router.get("/tournaments/:tournamentId/players", requireAuth, async (req, res) => {
