@@ -13,6 +13,7 @@ const {
   putTournamentMatches,
   deleteTournamentMatchRows,
   USE_SPLIT_TABLES,
+  deleteTournamentAggregate,
 } = require("../repositories/tournamentStore");
 
 let OpenAI = null;
@@ -1891,9 +1892,16 @@ router.patch("/tournaments/:tournamentId/registrations-open", requireAuth, async
 });
 
 router.delete("/tournaments/:tournamentId", requireAuth, async (req, res) => {
-  return res.status(503).json({
-    message: "Tournament delete temporarily disabled during migration"
-  });
+  try {
+    const tournament = await getTournament(req.params.tournamentId);
+    if (!assertOwner(req, tournament, res)) return;
+
+    const result = await deleteTournamentAggregate(req.params.tournamentId);
+    return res.json({ ok: true, ...result });
+  } catch (err) {
+    console.error("Delete tournament error:", err);
+    return res.status(500).json({ message: "Failed to delete tournament" });
+  }
 });
 
 // -----------------------------------------------------------------------------

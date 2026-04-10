@@ -541,6 +541,38 @@ async function updateTournamentMetaFields(tournamentId, fields) {
   return saveTournamentMeta(next);
 }
 
+async function deleteTournamentAggregate(tournamentId) {
+  const id = String(tournamentId || '').trim();
+  if (!id) throw new Error('tournamentId is required');
+
+  let removedMatches = 0;
+  let removedMeta = false;
+  let removedLegacy = false;
+
+  if (USE_SPLIT_TABLES) {
+    removedMatches = await deleteTournamentMatches(id);
+
+    const meta = await getTournamentMeta(id);
+    if (meta) {
+      await ddb.delete({ TableName: META_TABLE, Key: { tournamentId: id } }).promise();
+      removedMeta = true;
+    }
+  }
+
+  const legacy = await getLegacyTournament(id);
+  if (legacy) {
+    await ddb.delete({ TableName: LEGACY_TABLE, Key: { tournamentId: id } }).promise();
+    removedLegacy = true;
+  }
+
+  return {
+    tournamentId: id,
+    removedMatches,
+    removedMeta,
+    removedLegacy,
+  };
+}
+
 module.exports = {
   REGION,
   LEGACY_TABLE,
@@ -575,4 +607,5 @@ module.exports = {
   saveTournamentAggregate,
   updateTournamentAggregateFields,
   updateTournamentMetaFields,
+  deleteTournamentAggregate,
 };
