@@ -1622,6 +1622,71 @@ function rowsEqual(a, b) {
   return JSON.stringify(a || null) === JSON.stringify(b || null);
 }
 
+function getPosterSettingsDefaults(tournament = {}) {
+  return {
+    organizerName: "",
+    sponsorNames: [],
+    venueLabel: String(tournament?.venue || "").trim(),
+    cityName: "",
+    tagline: "",
+    socialHandle: "",
+    customFields: [],
+    visibility: {
+      organizerName: true,
+      sponsorNames: true,
+      venueLabel: false,
+      cityName: false,
+      tagline: false,
+      socialHandle: false,
+    },
+    updatedAt: null,
+    updatedBy: "",
+  };
+}
+
+function normalizePosterSettings(input, tournament = {}) {
+  const defaults = getPosterSettingsDefaults(tournament);
+  const raw = input && typeof input === "object" ? cloneJson(input) : {};
+  const visibility = raw?.visibility && typeof raw.visibility === "object" ? raw.visibility : {};
+
+  const sponsorNames = Array.isArray(raw?.sponsorNames)
+    ? raw.sponsorNames
+    : String(raw?.sponsorNames || "")
+        .split(/\r?\n|,/)
+        .map((value) => String(value || "").trim())
+        .filter(Boolean);
+
+  const customFields = asArray(raw?.customFields)
+    .map((field) => ({
+      label: String(field?.label || "").trim().slice(0, 40),
+      value: String(field?.value || "").trim().slice(0, 120),
+      position: String(field?.position || "bottom").trim().toLowerCase() === "top" ? "top" : "bottom",
+      enabled: field?.enabled !== false,
+    }))
+    .filter((field) => field.label && field.value)
+    .slice(0, 4);
+
+  return {
+    organizerName: String(raw?.organizerName || defaults.organizerName).trim().slice(0, 120),
+    sponsorNames: uniqStrings(sponsorNames).slice(0, 12),
+    venueLabel: String(raw?.venueLabel || defaults.venueLabel).trim().slice(0, 120),
+    cityName: String(raw?.cityName || defaults.cityName).trim().slice(0, 80),
+    tagline: String(raw?.tagline || defaults.tagline).trim().slice(0, 180),
+    socialHandle: String(raw?.socialHandle || defaults.socialHandle).trim().slice(0, 80),
+    customFields,
+    visibility: {
+      organizerName: Boolean(visibility.organizerName ?? defaults.visibility.organizerName),
+      sponsorNames: Boolean(visibility.sponsorNames ?? defaults.visibility.sponsorNames),
+      venueLabel: Boolean(visibility.venueLabel ?? defaults.visibility.venueLabel),
+      cityName: Boolean(visibility.cityName ?? defaults.visibility.cityName),
+      tagline: Boolean(visibility.tagline ?? defaults.visibility.tagline),
+      socialHandle: Boolean(visibility.socialHandle ?? defaults.visibility.socialHandle),
+    },
+    updatedAt: raw?.updatedAt || defaults.updatedAt,
+    updatedBy: String(raw?.updatedBy || defaults.updatedBy || "").trim(),
+  };
+}
+
 async function persistScoredFixtures(tournament, fixtures, fields = {}) {
   if (!USE_SPLIT_TABLES) {
     return updateTournamentFields(tournament.tournamentId, {
@@ -1816,6 +1881,47 @@ router.get("/tournaments/:tournamentId", requireAuth, async (req, res) => {
   } catch (err) {
     console.error("Get tournament error:", err);
     return res.status(500).json({ message: "Failed to load tournament" });
+  }
+});
+
+router.get("/tournaments/:tournamentId/poster-settings", requireAuth, async (req, res) => {
+  try {
+    const tournament = await getTournament(req.params.tournamentId);
+    if (!assertOwner(req, tournament, res)) return;
+
+    return res.json({
+      ok: true,
+      settings: normalizePosterSettings(tournament?.sharePosterConfig || null, tournament),
+    });
+  } catch (err) {
+    console.error("Get poster settings error:", err);
+    return res.status(500).json({ message: "Failed to load poster settings" });
+  }
+});
+
+router.put("/tournaments/:tournamentId/poster-settings", requireAuth, async (req, res) => {
+  try {
+    const tournament = await getTournament(req.params.tournamentId);
+    if (!assertOwner(req, tournament, res)) return;
+
+    const sharePosterConfig = {
+      ...normalizePosterSettings(req.body || {}, tournament),
+      updatedAt: nowIso(),
+      updatedBy: getAuthUsername(req),
+    };
+
+    const updated = await updateTournamentMetaFields(req.params.tournamentId, {
+      sharePosterConfig,
+      updatedBy: getAuthUsername(req),
+    });
+
+    return res.json({
+      ok: true,
+      settings: normalizePosterSettings(updated?.sharePosterConfig || sharePosterConfig, tournament),
+    });
+  } catch (err) {
+    console.error("Update poster settings error:", err);
+    return res.status(500).json({ message: "Failed to save poster settings" });
   }
 });
 

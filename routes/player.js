@@ -617,6 +617,204 @@ function getFixturesCategoryBucket(tournament, categoryId) {
   return categories[String(categoryId || "")] || null;
 }
 
+function getCurrentUserMatchNames(tournament, req, profile = null) {
+  const values = new Set();
+  const push = (value) => {
+    const normalized = normalizeText(value);
+    if (normalized) values.add(normalized);
+  };
+
+  push(req.user?.name);
+  push(req.user?.username);
+  push(req.user?.email);
+
+  getMyTournamentPlayerRecords(tournament, req, profile).forEach((player) => {
+    push(player?.playerName);
+    push(player?.name);
+    push(player?.username);
+  });
+
+  getMyTeams(tournament, req, profile).forEach((team) => {
+    push(team?.captainName);
+    push(team?.captainUsername);
+    asArray(team?.players).forEach((player) => {
+      push(player?.playerName);
+      push(player?.name);
+      push(player?.username);
+    });
+  });
+
+  return values;
+}
+
+function playerGroupContainsCurrentUser(players, tournament, req, profile = null) {
+  const mine = getCurrentUserMatchNames(tournament, req, profile);
+  return asArray(players).some((player) => mine.has(normalizeText(player)));
+}
+
+function getPosterSettingsDefaults(tournament = {}) {
+  return {
+    organizerName: "",
+    sponsorNames: [],
+    venueLabel: String(tournament?.venue || "").trim(),
+    cityName: "",
+    tagline: "",
+    socialHandle: "",
+    customFields: [],
+    visibility: {
+      organizerName: true,
+      sponsorNames: true,
+      venueLabel: false,
+      cityName: false,
+      tagline: false,
+      socialHandle: false,
+    },
+    updatedAt: null,
+    updatedBy: "",
+  };
+}
+
+function normalizePosterSettings(input, tournament = {}) {
+  const defaults = getPosterSettingsDefaults(tournament);
+  const raw = input && typeof input === "object" ? cloneJson(input) : {};
+  const visibility = raw?.visibility && typeof raw.visibility === "object" ? raw.visibility : {};
+
+  const sponsorSource = Array.isArray(raw?.sponsorNames)
+    ? raw.sponsorNames
+    : String(raw?.sponsorNames || "")
+        .split(/\r?\n|,/)
+        .map((value) => String(value || "").trim())
+        .filter(Boolean);
+
+  const customFields = asArray(raw?.customFields)
+    .map((field) => ({
+      label: String(field?.label || "").trim().slice(0, 40),
+      value: String(field?.value || "").trim().slice(0, 120),
+      position: String(field?.position || "bottom").trim().toLowerCase() === "top" ? "top" : "bottom",
+      enabled: field?.enabled !== false,
+    }))
+    .filter((field) => field.label && field.value)
+    .slice(0, 4);
+
+  return {
+    organizerName: String(raw?.organizerName || defaults.organizerName).trim(),
+    sponsorNames: sponsorSource.map((value) => String(value || "").trim()).filter(Boolean),
+    venueLabel: String(raw?.venueLabel || defaults.venueLabel).trim(),
+    cityName: String(raw?.cityName || defaults.cityName).trim(),
+    tagline: String(raw?.tagline || defaults.tagline).trim(),
+    socialHandle: String(raw?.socialHandle || defaults.socialHandle).trim(),
+    customFields,
+    visibility: {
+      organizerName: Boolean(visibility.organizerName ?? defaults.visibility.organizerName),
+      sponsorNames: Boolean(visibility.sponsorNames ?? defaults.visibility.sponsorNames),
+      venueLabel: Boolean(visibility.venueLabel ?? defaults.visibility.venueLabel),
+      cityName: Boolean(visibility.cityName ?? defaults.visibility.cityName),
+      tagline: Boolean(visibility.tagline ?? defaults.visibility.tagline),
+      socialHandle: Boolean(visibility.socialHandle ?? defaults.visibility.socialHandle),
+    },
+    updatedAt: raw?.updatedAt || defaults.updatedAt,
+    updatedBy: String(raw?.updatedBy || defaults.updatedBy || "").trim(),
+  };
+}
+
+function tournamentContainsCurrentUser(tournament, req, profile = null) {
+  const registered = getPlayers(tournament).some((player) => playerBelongsToCurrentUser(player, req, profile));
+  const invited = getTeamRequests(tournament).some((request) =>
+    asArray(request?.invitedPlayers).some((invite) => inviteBelongsToCurrentUser(invite, tournament, req, profile))
+  );
+  const assignedAsUmpire = getTournamentUmpires(tournament).some((umpire) =>
+    umpireBelongsToCurrentUser(umpire, req, profile)
+  );
+  return registered || invited || assignedAsUmpire;
+}
+
+function buildMyMatches(tournament, req, profile = null) {
+  const fixtures = tournament?.fixtures && typeof tournament.fixtures === "object"
+    ? tournament.fixtures
+    : { categories: {} };
+  const categories = fixtures.categories && typeof fixtures.categories === "object"
+    ? fixtures.categories
+    : {};
+
+  const matches = [];
+
+  Object.entries(categories).forEach(([categoryId, bucket]) => {
+    const rounds = asArray(bucket?.rounds).length
+      ? asArray(bucket?.rounds)
+      : [asArray(bucket?.matches)];
+    const categoryMeta = getCategoryMeta(tournament, categoryId);
+    const categoryLabel = String(bucket?.label || categoryMeta?.eventName || categoryId || "Category").trim();
+    const displayMode = String(bucket?.displayMode || "").trim();
+    const isTeamSchedule = displayMode.toLowerCase() === "team_schedule" || String(categoryId) === TEAM_EVENT_CATEGORY_ID;
+
+    rounds.forEach((round, roundIndex) => {
+      asArray(round).forEach((match, matchIndex) => {
+        const submatches = asArray(match?.submatches).map((submatch, submatchIndex) => {
+          const homeMine = playerGroupContainsCurrentUser(submatch?.homePlayers, tournament, req, profile);
+          const awayMine = playerGroupContainsCurrentUser(submatch?.awayPlayers, tournament, req, profile);
+          return {
+            ...cloneJson(submatch || {}),
+            submatchIndex,
+            isMine: homeMine || awayMine,
+            mySide: homeMine ? "home" : awayMine ? "away" : null,
+          };
+        });
+
+        const homeMine = playerGroupContainsCurrentUser(match?.homePlayers, tournament, req, profile);
+        const awayMine = playerGroupContainsCurrentUser(match?.awayPlayers, tournament, req, profile);
+        const mySubmatches = submatches.filter((submatch) => submatch.isMine);
+
+        if (!homeMine && !awayMine && !mySubmatches.length) return;
+
+        matches.push({
+          tournamentId: tournament.tournamentId,
+          tournamentName: tournament.tournamentName || "",
+          sportName: tournament.sportName || "",
+          categoryId,
+          categoryLabel,
+          displayMode,
+          isTeamSchedule,
+          roundIndex,
+          matchIndex,
+          roundLabel: match?.roundLabel || (isTeamSchedule ? `Match ${matchIndex + 1}` : `Round ${roundIndex + 1}`),
+          matchId: String(match?.matchId || match?.tieId || `${categoryId}-${roundIndex}-${matchIndex}`),
+          stage: String(match?.stage || "").trim(),
+          status: String(match?.status || "pending").trim(),
+          date: String(match?.date || "").trim(),
+          time: String(match?.time || "").trim(),
+          court: String(match?.court || "").trim(),
+          home: String(match?.home || "Home").trim(),
+          away: String(match?.away || "Away").trim(),
+          homePlayers: asArray(match?.homePlayers),
+          awayPlayers: asArray(match?.awayPlayers),
+          score: cloneJson(match?.score || null),
+          submatches,
+          matchPointsHome: Number(match?.matchPointsHome || 0) || 0,
+          matchPointsAway: Number(match?.matchPointsAway || 0) || 0,
+          participation: {
+            mySide: homeMine ? "home" : awayMine ? "away" : null,
+            submatchIndexes: mySubmatches.map((submatch) => Number(submatch.submatchIndex)),
+          },
+        });
+      });
+    });
+  });
+
+  return matches.sort((a, b) => {
+    const statusRank = (status) => {
+      const normalized = normalizeText(status);
+      if (normalized === "live") return 0;
+      if (normalized === "completed") return 1;
+      return 2;
+    };
+
+    const byStatus = statusRank(a.status) - statusRank(b.status);
+    if (byStatus !== 0) return byStatus;
+    if (Number(a.roundIndex) !== Number(b.roundIndex)) return Number(a.roundIndex) - Number(b.roundIndex);
+    return Number(a.matchIndex) - Number(b.matchIndex);
+  });
+}
+
 function findTieInTournament(tournament, categoryId, tieId) {
   const bucket = getFixturesCategoryBucket(tournament, categoryId);
   const rounds = asArray(bucket?.rounds);
@@ -979,6 +1177,32 @@ router.get("/tournaments/:tournamentId/teams", requireAuth, async (req, res) => 
     });
   } catch (err) {
     console.error("GET /api/player/tournaments/:tournamentId/teams error:", err);
+    return res.status(500).json({ message: "Server error", error: err?.message || String(err) });
+  }
+});
+
+router.get("/tournaments/:tournamentId/my-matches", requireAuth, async (req, res) => {
+  try {
+    const tournament = await getTournament(req.params.tournamentId);
+    if (!tournament) {
+      return res.status(404).json({ message: "Tournament not found" });
+    }
+
+    const profile = await getCurrentUserProfile(req);
+    if (!tournamentContainsCurrentUser(tournament, req, profile)) {
+      return res.status(403).json({ message: "You are not part of this tournament" });
+    }
+
+    return res.json({
+      ok: true,
+      tournamentId: tournament.tournamentId,
+      tournamentName: tournament.tournamentName || "",
+      sportName: tournament.sportName || "",
+      posterSettings: normalizePosterSettings(tournament?.sharePosterConfig || null, tournament),
+      matches: buildMyMatches(tournament, req, profile),
+    });
+  } catch (err) {
+    console.error("GET /api/player/tournaments/:tournamentId/my-matches error:", err);
     return res.status(500).json({ message: "Server error", error: err?.message || String(err) });
   }
 });
