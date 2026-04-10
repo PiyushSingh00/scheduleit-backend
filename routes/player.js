@@ -737,6 +737,21 @@ function getCurrentUserMatchNamesWithPendingLinks(tournament, req, profile = nul
   return values;
 }
 
+function getCurrentUserTeamNames(tournament, req, profile = null, pendingLinks = []) {
+  const values = new Set();
+  getMyTeams(tournament, req, profile).forEach((team) => {
+    const teamName = normalizeText(team?.teamName || "");
+    if (teamName) values.add(teamName);
+  });
+
+  asArray(pendingLinks).forEach((link) => {
+    const linkTeamName = normalizeText(link?.teamName || "");
+    if (linkTeamName) values.add(linkTeamName);
+  });
+
+  return values;
+}
+
 function playerGroupContainsCurrentUser(players, tournament, req, profile = null) {
   const mine = getCurrentUserMatchNames(tournament, req, profile);
   return asArray(players).some((player) => mine.has(normalizeText(player)));
@@ -866,6 +881,7 @@ function buildMyMatches(tournament, req, profile = null, pendingLinks = []) {
     rounds.forEach((round, roundIndex) => {
       asArray(round).forEach((match, matchIndex) => {
         const myNames = getCurrentUserMatchNamesWithPendingLinks(tournament, req, profile, pendingLinks);
+        const myTeamNames = getCurrentUserTeamNames(tournament, req, profile, pendingLinks);
         const submatches = asArray(match?.submatches).map((submatch, submatchIndex) => {
           const homeMine = asArray(submatch?.homePlayers).some((player) => myNames.has(normalizeText(player)));
           const awayMine = asArray(submatch?.awayPlayers).some((player) => myNames.has(normalizeText(player)));
@@ -879,9 +895,11 @@ function buildMyMatches(tournament, req, profile = null, pendingLinks = []) {
 
         const homeMine = asArray(match?.homePlayers).some((player) => myNames.has(normalizeText(player)));
         const awayMine = asArray(match?.awayPlayers).some((player) => myNames.has(normalizeText(player)));
-          const mySubmatches = submatches.filter((submatch) => submatch.isMine);
+        const homeTeamMine = myTeamNames.has(normalizeText(match?.home));
+        const awayTeamMine = myTeamNames.has(normalizeText(match?.away));
+        const mySubmatches = submatches.filter((submatch) => submatch.isMine);
 
-        if (!homeMine && !awayMine && !mySubmatches.length) return;
+        if (!homeMine && !awayMine && !homeTeamMine && !awayTeamMine && !mySubmatches.length) return;
 
         matches.push({
           tournamentId: tournament.tournamentId,
@@ -909,7 +927,15 @@ function buildMyMatches(tournament, req, profile = null, pendingLinks = []) {
           matchPointsHome: Number(match?.matchPointsHome || 0) || 0,
           matchPointsAway: Number(match?.matchPointsAway || 0) || 0,
           participation: {
-            mySide: homeMine ? "home" : awayMine ? "away" : null,
+            mySide: homeMine
+              ? "home"
+              : awayMine
+                ? "away"
+                : homeTeamMine
+                  ? "home"
+                  : awayTeamMine
+                    ? "away"
+                    : null,
             submatchIndexes: mySubmatches.map((submatch) => Number(submatch.submatchIndex)),
           },
         });
