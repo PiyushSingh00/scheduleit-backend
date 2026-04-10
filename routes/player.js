@@ -744,10 +744,31 @@ function getCurrentUserTeamNames(tournament, req, profile = null, pendingLinks =
     if (teamName) values.add(teamName);
   });
 
-  asArray(pendingLinks).forEach((link) => {
-    const linkTeamName = normalizeText(link?.teamName || "");
-    if (linkTeamName) values.add(linkTeamName);
-  });
+  if (asArray(pendingLinks).length) {
+    const linkedNames = new Set(
+      asArray(pendingLinks)
+        .map((link) => normalizeText(link?.playerName || link?.name || ""))
+        .filter(Boolean)
+    );
+
+    rebuildTeamsFromTournament(tournament).forEach((team) => {
+      const captainName = normalizeText(team?.captainName || "");
+      if (captainName && linkedNames.has(captainName)) {
+        const teamName = normalizeText(team?.teamName || "");
+        if (teamName) values.add(teamName);
+        return;
+      }
+
+      const containsLinkedPlayer = asArray(team?.players).some((player) =>
+        linkedNames.has(normalizeText(player?.playerName || player?.name || ""))
+      );
+
+      if (containsLinkedPlayer) {
+        const teamName = normalizeText(team?.teamName || "");
+        if (teamName) values.add(teamName);
+      }
+    });
+  }
 
   return values;
 }
