@@ -617,6 +617,13 @@ function getFixturesCategoryBucket(tournament, categoryId) {
   return categories[String(categoryId || "")] || null;
 }
 
+function splitFixtureNames(value) {
+  const text = String(value || "").trim();
+  const upper = text.toUpperCase();
+  if (!text || upper === "BYE" || upper === "TBD") return [];
+  return text.split(" + ").map((entry) => entry.trim()).filter(Boolean);
+}
+
 function getCurrentUserMatchNames(tournament, req, profile = null) {
   const values = new Set();
   const push = (value) => {
@@ -725,7 +732,32 @@ function tournamentContainsCurrentUser(tournament, req, profile = null) {
   const assignedAsUmpire = getTournamentUmpires(tournament).some((umpire) =>
     umpireBelongsToCurrentUser(umpire, req, profile)
   );
-  return registered || invited || assignedAsUmpire;
+  const myNames = getCurrentUserMatchNames(tournament, req, profile);
+  const fixtures = tournament?.fixtures && typeof tournament.fixtures === "object" ? tournament.fixtures : { categories: {} };
+  const categories = fixtures.categories && typeof fixtures.categories === "object" ? fixtures.categories : {};
+
+  const playedInFixtures = Object.values(categories).some((bucket) => {
+    const rounds = asArray(bucket?.rounds).length ? asArray(bucket.rounds) : [asArray(bucket?.matches)];
+    return rounds.some((round) =>
+      asArray(round).some((match) => {
+        const topLevelNames = [
+          ...asArray(match?.homePlayers),
+          ...asArray(match?.awayPlayers),
+          ...splitFixtureNames(match?.home),
+          ...splitFixtureNames(match?.away),
+        ];
+        if (topLevelNames.some((name) => myNames.has(normalizeText(name)))) return true;
+
+        return asArray(match?.submatches).some((submatch) =>
+          [...asArray(submatch?.homePlayers), ...asArray(submatch?.awayPlayers)].some((name) =>
+            myNames.has(normalizeText(name))
+          )
+        );
+      })
+    );
+  });
+
+  return registered || invited || assignedAsUmpire || playedInFixtures;
 }
 
 function buildMyMatches(tournament, req, profile = null) {
