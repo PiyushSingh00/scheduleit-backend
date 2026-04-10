@@ -163,6 +163,37 @@ async function getPendingLinkedTournamentIds(req, profile = null) {
   }
 }
 
+async function getPendingLinkRowsForCurrentUser(req, profile = null, tournamentId = "") {
+  const phone = normalizePhone(
+    profile?.phone ||
+    profile?.phoneNumber ||
+    profile?.mobile ||
+    req.user?.phone ||
+    req.user?.phoneNumber ||
+    req.user?.mobile ||
+    ""
+  );
+
+  if (!phone) return [];
+
+  try {
+    const result = await ddb.query({
+      TableName: PENDING_PLAYER_LINKS_TABLE,
+      KeyConditionExpression: `${PENDING_PLAYER_LINKS_PARTITION_KEY} = :phone`,
+      ExpressionAttributeValues: {
+        ":phone": phone,
+      },
+    }).promise();
+
+    return asArray(result.Items).filter((item) =>
+      !tournamentId || String(item?.tournamentId || "").trim() === String(tournamentId || "").trim()
+    );
+  } catch (err) {
+    console.warn("Could not load pending player link rows in player route:", err?.message || err);
+    return [];
+  }
+}
+
 async function getCurrentUserProfile(req) {
   const directPhone = normalizePhone(
     req.user?.phone ||
@@ -557,6 +588,7 @@ function buildRequestRoster(request) {
       playerId: captainPlayerId,
       playerName: captainName || captainUsername || "Captain",
       username: captainUsername || "",
+      phone: String(request?.captainPhone || "").trim(),
       inviteStatus: "accepted",
       isCaptain: true,
     });
@@ -598,6 +630,7 @@ function rebuildTeamsFromTournament(tournament) {
       captainPlayerId: String(captain?.playerId || captain?.captainPlayerId || "").trim(),
       captainName: String(captain?.playerName || captain?.captainName || "Captain").trim(),
       captainUsername: String(captain?.username || captain?.captainUsername || "").trim(),
+      captainPhone: String(captain?.phone || captain?.captainPhone || "").trim(),
       categoryId: String(categoryId || ""),
       teamStatus: String(captain?.teamStatus || "pending").trim() || "pending",
       requestId: null,
@@ -614,6 +647,7 @@ function rebuildTeamsFromTournament(tournament) {
       captainPlayerId: String(request?.captainPlayerId || "").trim(),
       captainName: String(request?.captainName || "Captain").trim(),
       captainUsername: String(request?.captainUsername || "").trim(),
+      captainPhone: String(request?.captainPhone || "").trim(),
       categoryId: String(categoryId || ""),
       teamStatus: "pending",
       requestId: String(request?.requestId || "").trim(),
@@ -623,6 +657,7 @@ function rebuildTeamsFromTournament(tournament) {
     existing.requestId = String(request?.requestId || existing.requestId || "").trim();
     existing.teamName = String(request?.teamName || existing.teamName || "My Team").trim() || "My Team";
     existing.categoryId = String(categoryId || existing.categoryId || "");
+    existing.captainPhone = String(request?.captainPhone || existing.captainPhone || "").trim();
     existing.players = buildRequestRoster(request);
     if (existing.players.length) existing.teamStatus = "accepted";
 
@@ -688,6 +723,17 @@ function getCurrentUserMatchNames(tournament, req, profile = null) {
     });
   });
 
+  return values;
+}
+
+function getCurrentUserMatchNamesWithPendingLinks(tournament, req, profile = null, pendingLinks = []) {
+  const values = getCurrentUserMatchNames(tournament, req, profile);
+  asArray(pendingLinks).forEach((link) => {
+    const playerName = normalizeText(link?.playerName || link?.name || "");
+    if (playerName) values.add(playerName);
+    const username = normalizeText(link?.username || "");
+    if (username) values.add(username);
+  });
   return values;
 }
 
@@ -761,7 +807,7 @@ function normalizePosterSettings(input, tournament = {}) {
   };
 }
 
-function tournamentContainsCurrentUser(tournament, req, profile = null) {
+function tournamentContainsCurrentUser(tournament, req, profile = null, pendingLinks = []) {
   const registered = getPlayers(tournament).some((player) => playerBelongsToCurrentUser(player, req, profile));
   const invited = getTeamRequests(tournament).some((request) =>
     asArray(request?.invitedPlayers).some((invite) => inviteBelongsToCurrentUser(invite, tournament, req, profile))
@@ -769,7 +815,7 @@ function tournamentContainsCurrentUser(tournament, req, profile = null) {
   const assignedAsUmpire = getTournamentUmpires(tournament).some((umpire) =>
     umpireBelongsToCurrentUser(umpire, req, profile)
   );
-  const myNames = getCurrentUserMatchNames(tournament, req, profile);
+  const myNames = getCurrentUserMatchNamesWithPendingLinks(tournament, req, profile, pendingLinks);
   const fixtures = tournament?.fixtures && typeof tournament.fixtures === "object" ? tournament.fixtures : { categories: {} };
   const categories = fixtures.categories && typeof fixtures.categories === "object" ? fixtures.categories : {};
 
@@ -794,10 +840,11 @@ function tournamentContainsCurrentUser(tournament, req, profile = null) {
     );
   });
 
-  return registered || invited || assignedAsUmpire || playedInFixtures;
+  const linkedByPendingPhone = asArray(pendingLinks).length > 0;
+  return registered || invited || assignedAsUmpire || playedInFixtures || linkedByPendingPhone;
 }
 
-function buildMyMatches(tournament, req, profile = null) {
+function buildMyMatches(tournament, req, profile = null, pendingLinks = []) {
   const fixtures = tournament?.fixtures && typeof tournament.fixtures === "object"
     ? tournament.fixtures
     : { categories: {} };
@@ -818,9 +865,10 @@ function buildMyMatches(tournament, req, profile = null) {
 
     rounds.forEach((round, roundIndex) => {
       asArray(round).forEach((match, matchIndex) => {
+        const myNames = getCurrentUserMatchNamesWithPendingLinks(tournament, req, profile, pendingLinks);
         const submatches = asArray(match?.submatches).map((submatch, submatchIndex) => {
-          const homeMine = playerGroupContainsCurrentUser(submatch?.homePlayers, tournament, req, profile);
-          const awayMine = playerGroupContainsCurrentUser(submatch?.awayPlayers, tournament, req, profile);
+          const homeMine = asArray(submatch?.homePlayers).some((player) => myNames.has(normalizeText(player)));
+          const awayMine = asArray(submatch?.awayPlayers).some((player) => myNames.has(normalizeText(player)));
           return {
             ...cloneJson(submatch || {}),
             submatchIndex,
@@ -829,9 +877,9 @@ function buildMyMatches(tournament, req, profile = null) {
           };
         });
 
-        const homeMine = playerGroupContainsCurrentUser(match?.homePlayers, tournament, req, profile);
-        const awayMine = playerGroupContainsCurrentUser(match?.awayPlayers, tournament, req, profile);
-        const mySubmatches = submatches.filter((submatch) => submatch.isMine);
+        const homeMine = asArray(match?.homePlayers).some((player) => myNames.has(normalizeText(player)));
+        const awayMine = asArray(match?.awayPlayers).some((player) => myNames.has(normalizeText(player)));
+          const mySubmatches = submatches.filter((submatch) => submatch.isMine);
 
         if (!homeMine && !awayMine && !mySubmatches.length) return;
 
@@ -1242,7 +1290,21 @@ router.get("/tournaments/:tournamentId/teams", requireAuth, async (req, res) => 
     }
 
     const profile = await getCurrentUserProfile(req);
-    const teams = getMyTeams(tournament, req, profile);
+    const pendingLinks = await getPendingLinkRowsForCurrentUser(req, profile, req.params.tournamentId);
+    let teams = getMyTeams(tournament, req, profile);
+
+    if (!teams.length && pendingLinks.length) {
+      const linkedNames = new Set(
+        pendingLinks.map((link) => normalizeText(link?.playerName || "")).filter(Boolean)
+      );
+      teams = rebuildTeamsFromTournament(tournament).filter((team) => {
+        const captainName = normalizeText(team?.captainName || "");
+        if (captainName && linkedNames.has(captainName)) return true;
+        return asArray(team?.players).some((player) =>
+          linkedNames.has(normalizeText(player?.playerName || player?.name || ""))
+        );
+      });
+    }
 
     return res.json({
       ok: true,
@@ -1262,7 +1324,8 @@ router.get("/tournaments/:tournamentId/my-matches", requireAuth, async (req, res
     }
 
     const profile = await getCurrentUserProfile(req);
-    if (!tournamentContainsCurrentUser(tournament, req, profile)) {
+    const pendingLinks = await getPendingLinkRowsForCurrentUser(req, profile, req.params.tournamentId);
+    if (!tournamentContainsCurrentUser(tournament, req, profile, pendingLinks)) {
       return res.status(403).json({ message: "You are not part of this tournament" });
     }
 
@@ -1272,7 +1335,7 @@ router.get("/tournaments/:tournamentId/my-matches", requireAuth, async (req, res
       tournamentName: tournament.tournamentName || "",
       sportName: tournament.sportName || "",
       posterSettings: normalizePosterSettings(tournament?.sharePosterConfig || null, tournament),
-      matches: buildMyMatches(tournament, req, profile),
+      matches: buildMyMatches(tournament, req, profile, pendingLinks),
     });
   } catch (err) {
     console.error("GET /api/player/tournaments/:tournamentId/my-matches error:", err);
