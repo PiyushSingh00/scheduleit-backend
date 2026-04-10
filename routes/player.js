@@ -752,6 +752,46 @@ function getCurrentUserTeamNames(tournament, req, profile = null, pendingLinks =
   return values;
 }
 
+function getDisplayScoreForSide(match, side = "home") {
+  const isAway = String(side).toLowerCase() === "away";
+  const direct = isAway ? match?.score?.state?.B : match?.score?.state?.A;
+  if (typeof direct === "number") return direct;
+  if (typeof direct === "string" && direct.trim()) return direct.trim();
+  if (typeof direct?.value === "number") return direct.value;
+  if (typeof direct?.score === "number") return direct.score;
+  if (typeof direct?.points === "number") return direct.points;
+
+  const pointsValue = isAway
+    ? Number(match?.matchPointsAway ?? match?.summary?.awayMatchPoints ?? NaN)
+    : Number(match?.matchPointsHome ?? match?.summary?.homeMatchPoints ?? NaN);
+  if (Number.isFinite(pointsValue)) return pointsValue;
+
+  const computedValue = isAway
+    ? match?.score?.computed?.bValue ?? match?.score?.computed?.awayScore
+    : match?.score?.computed?.aValue ?? match?.score?.computed?.homeScore;
+  if (typeof computedValue === "number") return computedValue;
+  if (typeof computedValue === "string" && computedValue.trim()) return computedValue.trim();
+
+  return null;
+}
+
+function getTeamMatchDisplayTotals(match) {
+  const totals = {
+    homeWins: 0,
+    awayWins: 0,
+    homePoints: Number(match?.matchPointsHome || 0) || 0,
+    awayPoints: Number(match?.matchPointsAway || 0) || 0,
+  };
+
+  asArray(match?.submatches).forEach((submatch) => {
+    const winnerSide = normalizeText(submatch?.winnerSide || submatch?.score?.computed?.winnerSide || "");
+    if (winnerSide === "a" || winnerSide === "home") totals.homeWins += 1;
+    if (winnerSide === "b" || winnerSide === "away") totals.awayWins += 1;
+  });
+
+  return totals;
+}
+
 function playerGroupContainsCurrentUser(players, tournament, req, profile = null) {
   const mine = getCurrentUserMatchNames(tournament, req, profile);
   return asArray(players).some((player) => mine.has(normalizeText(player)));
@@ -888,6 +928,10 @@ function buildMyMatches(tournament, req, profile = null, pendingLinks = []) {
           return {
             ...cloneJson(submatch || {}),
             submatchIndex,
+            displayScore: {
+              home: getDisplayScoreForSide(submatch, "home"),
+              away: getDisplayScoreForSide(submatch, "away"),
+            },
             isMine: homeMine || awayMine,
             mySide: homeMine ? "home" : awayMine ? "away" : null,
           };
@@ -923,6 +967,11 @@ function buildMyMatches(tournament, req, profile = null, pendingLinks = []) {
           homePlayers: asArray(match?.homePlayers),
           awayPlayers: asArray(match?.awayPlayers),
           score: cloneJson(match?.score || null),
+          displayScore: {
+            home: getDisplayScoreForSide(match, "home"),
+            away: getDisplayScoreForSide(match, "away"),
+          },
+          displayTotals: getTeamMatchDisplayTotals(match),
           submatches,
           matchPointsHome: Number(match?.matchPointsHome || 0) || 0,
           matchPointsAway: Number(match?.matchPointsAway || 0) || 0,
