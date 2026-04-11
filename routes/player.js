@@ -231,17 +231,26 @@ async function getCurrentUserProfile(req) {
     const meUserId = String(getAuthUserId(req) || "").trim();
     const meUsername = normalizeText(getAuthUsername(req));
     const meEmail = normalizeText(req.user?.email || "");
+    let ExclusiveStartKey;
+    do {
+      const scan = await ddb.scan({
+        TableName: USER_DETAILS_TABLE,
+        ExclusiveStartKey,
+      }).promise();
 
-    const scan = await ddb.scan({ TableName: USER_DETAILS_TABLE }).promise();
-    const item = asArray(scan.Items).find((row) => {
-      return (
-        String(row?.userId || row?.id || "").trim() === meUserId ||
-        normalizeText(row?.username) === meUsername ||
-        normalizeText(row?.email) === meEmail
-      );
-    });
+      const item = asArray(scan.Items).find((row) => {
+        return (
+          String(row?.userId || row?.id || "").trim() === meUserId ||
+          normalizeText(row?.username) === meUsername ||
+          normalizeText(row?.email) === meEmail
+        );
+      });
 
-    return item || null;
+      if (item) return item;
+      ExclusiveStartKey = scan.LastEvaluatedKey;
+    } while (ExclusiveStartKey);
+
+    return null;
   } catch (err) {
     console.warn("Could not load current user profile for phone lookup:", err?.message || err);
     return null;
