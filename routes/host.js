@@ -3364,8 +3364,10 @@ router.post("/tournaments/:tournamentId/lineups", requireAuth, async (req, res) 
     const lineups = getLineupsState(tournament);
     const categoryId = resolveCategoryId(tournament, incoming.categoryId, { preferSyntheticForTeam: isTeamTournament(tournament) });
     const tieId = String(incoming.tieId || uuid());
+    const existingTie = lineups.ties.find((tie) => String(tie?.tieId || "") === tieId) || null;
 
     const nextTie = {
+      ...(existingTie || {}),
       tieId,
       tieLabel: String(incoming.tieLabel || "Tie").trim(),
       teamA: String(incoming.teamA || incoming.teamName || "").trim(),
@@ -3376,8 +3378,9 @@ router.post("/tournaments/:tournamentId/lineups", requireAuth, async (req, res) 
       captainName: String(incoming.captainName || getAuthDisplayName(req) || "").trim(),
       teamPlayers: asArray(incoming.teamPlayers || incoming.roster).map((p) => ({ ...p })),
       assignments: asArray(incoming.assignments || incoming.submatches).map((x) => ({ ...x })),
-      locked: Boolean(incoming.locked),
-      submittedAt: nowIso(),
+      locked: incoming.locked === undefined ? Boolean(existingTie?.locked || existingTie?.lineupLocked) : Boolean(incoming.locked),
+      lineupLocked: incoming.locked === undefined ? Boolean(existingTie?.lineupLocked || existingTie?.locked) : Boolean(incoming.locked),
+      submittedAt: existingTie?.submittedAt || nowIso(),
       updatedAt: nowIso(),
     };
 
