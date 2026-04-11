@@ -891,7 +891,8 @@ function shuffle(arr) {
 }
 
 function createBracket(names, teamMap = {}, options = {}) {
-  const entrants = shuffle(names.filter(Boolean));
+  const shouldShuffle = options.shuffle !== false;
+  const entrants = shouldShuffle ? shuffle(names.filter(Boolean)) : names.filter(Boolean);
   if (entrants.length < 2) return null;
 
   const size = nextPow2(entrants.length);
@@ -937,6 +938,70 @@ function createBracket(names, teamMap = {}, options = {}) {
   }
 
   return { rounds, totalRounds };
+}
+
+function getSemifinalPairingRule(tournament) {
+  const adv = getAdvancedSettings(tournament);
+  return normalizeText(adv?.semifinalPairing || tournament?.advancedSettings?.semifinalPairing) || "1v4_2v3";
+}
+
+function buildQualifiedKnockoutEntrants(tournament, qualifiedRows = []) {
+  const qualified = asArray(qualifiedRows).filter(Boolean);
+  if (qualified.length < 2) return [];
+
+  if (qualified.length >= 4) {
+    const seeded = qualified.slice(0, 4).map((row) => String(row?.teamName || "").trim()).filter(Boolean);
+    const pairingRule = getSemifinalPairingRule(tournament);
+    if (pairingRule === "1v3_2v4") {
+      return [seeded[0], seeded[2], seeded[1], seeded[3]].filter(Boolean);
+    }
+    return [seeded[0], seeded[3], seeded[1], seeded[2]].filter(Boolean);
+  }
+
+  return qualified.slice(0, 2).map((row) => String(row?.teamName || "").trim()).filter(Boolean);
+}
+
+function hasRecordedScorePayload(score) {
+  if (!score || typeof score !== "object") return false;
+  const computed = score.computed || {};
+  if (normalizeText(computed.status) && normalizeText(computed.status) !== "pending") return true;
+  if (typeof computed.homeScore === "number" || typeof computed.awayScore === "number") return true;
+  if (score.state?.A?.points != null || score.state?.B?.points != null) return true;
+  return false;
+}
+
+function hasKnockoutMatchStarted(match) {
+  if (!match || typeof match !== "object") return false;
+  const status = normalizeText(match.status);
+  if (status && status !== "pending") return true;
+  if (match.winner || match.winnerSide) return true;
+  if (toFiniteNumber(match.matchPointsHome, 0) > 0 || toFiniteNumber(match.matchPointsAway, 0) > 0) return true;
+  if (hasRecordedScorePayload(match.score)) return true;
+  return asArray(match.submatches).some((submatch) => {
+    const subStatus = normalizeText(submatch?.status);
+    if (subStatus && subStatus !== "pending") return true;
+    if (submatch?.winner || submatch?.winnerSide) return true;
+    return hasRecordedScorePayload(submatch?.score);
+  });
+}
+
+function getFirstKnockoutRoundIndex(bucket) {
+  return asArray(bucket?.rounds).findIndex((round) => asArray(round).some((match) => normalizeText(match?.stage) === "knockout"));
+}
+
+function getBaseRoundsWithoutKnockout(bucket) {
+  const rounds = asArray(bucket?.rounds);
+  const firstKnockoutIndex = getFirstKnockoutRoundIndex(bucket);
+  if (firstKnockoutIndex < 0) return rounds;
+  return rounds.slice(0, firstKnockoutIndex);
+}
+
+function hasStartedKnockoutRounds(bucket) {
+  const firstKnockoutIndex = getFirstKnockoutRoundIndex(bucket);
+  if (firstKnockoutIndex < 0) return false;
+  return asArray(bucket?.rounds)
+    .slice(firstKnockoutIndex)
+    .some((round) => asArray(round).some((match) => hasKnockoutMatchStarted(match)));
 }
 
 function getRoundLabel(roundIndex, totalRounds) {
@@ -1432,20 +1497,110 @@ function ensureLeaderboardRow(map, teamName) {
       tiesWon: 0,
       tiesLost: 0,
       tiesDrawn: 0,
+      submatchesWon: 0,
       headToHead: "-",
+      tiebreakResolvedBy: null,
+      requiresDecider: false,
+      deciderAgainst: null,
       qualified: false,
     });
   }
   return map.get(key);
 }
 
+function getPairRecords(results, a, b) {
+  return asArray(results?.[getPairKey(a, b)]).filter(Boolean);
+}
+
+function getLatestCompletedHeadToHead(results, a, b) {
+  const rec = getPairRecords(results, a, b).filter((entry) => normalizeText(entry?.status) === "completed");
+  if (!rec.length) return null;
+  return rec[rec.length - 1];
+}
+
+function getHeadToHeadPointsForTeams(record, a, b) {
+  if (!record) return null;
+  if (record.home === a && record.away === b) {
+    return {
+      teamA: Number(record.homePoints || 0),
+      teamB: Number(record.awayPoints || 0),
+    };
+  }
+  if (record.home === b && record.away === a) {
+    return {
+      teamA: Number(record.awayPoints || 0),
+      teamB: Number(record.homePoints || 0),
+    };
+  }
+  return null;
+}
+
 function computeHeadToHeadSummary(results, a, b) {
-  const rec = results[getPairKey(a, b)] || [];
-  if (!rec.length) return "-";
-  const winsA = rec.filter((x) => x.winner === a).length;
-  const winsB = rec.filter((x) => x.winner === b).length;
-  if (winsA === winsB) return "-";
-  return winsA > winsB ? `${a} lead` : `${b} lead`;
+  const latest = getLatestCompletedHeadToHead(results, a, b);
+  const points = getHeadToHeadPointsForTeams(latest, a, b);
+  if (!points) return "-";
+  if (points.teamA === points.teamB) return `${a} ${points.teamA}-${points.teamB} ${b}`;
+  return points.teamA > points.teamB
+    ? `${a} ${points.teamA}-${points.teamB}`
+    : `${b} ${points.teamB}-${points.teamA}`;
+}
+
+function getPrimaryLeaderboardTieKey(row, useMatchPointsRanking) {
+  const leaguePoints = !useMatchPointsRanking ? Number(row?.leaguePoints || 0) : 0;
+  const matchPoints = Number(row?.matchPoints || 0);
+  const tiesWon = Number(row?.tiesWon || 0);
+  return `${leaguePoints}__${matchPoints}__${tiesWon}`;
+}
+
+function resolveExactTwoTeamTie(rows, pairResults, useMatchPointsRanking) {
+  if (rows.length !== 2) return rows;
+  const [a, b] = rows.map((row) => ({
+    ...row,
+    headToHead: row?.headToHead || "-",
+    tiebreakResolvedBy: row?.tiebreakResolvedBy || null,
+    requiresDecider: false,
+    deciderAgainst: null,
+  }));
+
+  const latestHeadToHead = getLatestCompletedHeadToHead(pairResults, a.teamName, b.teamName);
+  const directPoints = getHeadToHeadPointsForTeams(latestHeadToHead, a.teamName, b.teamName);
+
+  if (directPoints) {
+    const summary = `${a.teamName} ${directPoints.teamA}-${directPoints.teamB} ${b.teamName}`;
+    a.headToHead = summary;
+    b.headToHead = summary;
+    if (directPoints.teamA !== directPoints.teamB) {
+      const ordered = directPoints.teamA > directPoints.teamB ? [a, b] : [b, a];
+      ordered.forEach((row) => {
+        row.tiebreakResolvedBy = "head_to_head_match_points";
+      });
+      return ordered;
+    }
+
+    a.requiresDecider = true;
+    b.requiresDecider = true;
+    a.deciderAgainst = b.teamName;
+    b.deciderAgainst = a.teamName;
+    a.tiebreakResolvedBy = "decider_required";
+    b.tiebreakResolvedBy = "decider_required";
+    return [a, b];
+  }
+
+  if (Number(a.submatchesWon || 0) !== Number(b.submatchesWon || 0)) {
+    const ordered = Number(a.submatchesWon || 0) > Number(b.submatchesWon || 0) ? [a, b] : [b, a];
+    ordered.forEach((row) => {
+      row.tiebreakResolvedBy = "total_submatches_won";
+    });
+    return ordered;
+  }
+
+  a.requiresDecider = true;
+  b.requiresDecider = true;
+  a.deciderAgainst = b.teamName;
+  b.deciderAgainst = a.teamName;
+  a.tiebreakResolvedBy = "decider_required";
+  b.tiebreakResolvedBy = "decider_required";
+  return [a, b];
 }
 
 function computeLeaderboardRows(tournament, categoryId, fixturesOverride) {
@@ -1471,8 +1626,11 @@ function computeLeaderboardRows(tournament, categoryId, fixturesOverride) {
       const { homePoints, awayPoints } = getMatchScoreNumbers(match);
       home.matchPoints += homePoints;
       away.matchPoints += awayPoints;
+      home.submatchesWon += toFiniteNumber(match?.homeWins ?? match?.summary?.homeWins, 0) || 0;
+      away.submatchesWon += toFiniteNumber(match?.awayWins ?? match?.summary?.awayWins, 0) || 0;
 
       const winner = String(match?.winner || "").trim();
+      const status = normalizeText(match?.status);
       const draw = !winner && normalizeText(match?.status) === "completed";
 
       if (winner && winner === home.teamName) {
@@ -1495,11 +1653,26 @@ function computeLeaderboardRows(tournament, categoryId, fixturesOverride) {
 
       const pairKey = getPairKey(home.teamName, away.teamName);
       pairResults[pairKey] = pairResults[pairKey] || [];
-      pairResults[pairKey].push({ winner, home: home.teamName, away: away.teamName });
+      pairResults[pairKey].push({
+        winner,
+        home: home.teamName,
+        away: away.teamName,
+        homePoints,
+        awayPoints,
+        homeSubmatchesWon: toFiniteNumber(match?.homeWins ?? match?.summary?.homeWins, 0) || 0,
+        awaySubmatchesWon: toFiniteNumber(match?.awayWins ?? match?.summary?.awayWins, 0) || 0,
+        status,
+      });
     });
   });
 
-  const rows = Array.from(map.values());
+  const rows = Array.from(map.values()).map((row) => ({
+    ...row,
+    headToHead: "-",
+    tiebreakResolvedBy: null,
+    requiresDecider: false,
+    deciderAgainst: null,
+  }));
   rows.sort((a, b) => {
     if (!useMatchPointsRanking && b.leaguePoints !== a.leaguePoints) return b.leaguePoints - a.leaguePoints;
     if (b.matchPoints !== a.matchPoints) return b.matchPoints - a.matchPoints;
@@ -1507,23 +1680,36 @@ function computeLeaderboardRows(tournament, categoryId, fixturesOverride) {
     return a.teamName.localeCompare(b.teamName);
   });
 
-  rows.forEach((row, idx) => {
+  const resolvedRows = [];
+  for (let index = 0; index < rows.length; ) {
+    const start = index;
+    const key = getPrimaryLeaderboardTieKey(rows[index], useMatchPointsRanking);
+    while (index < rows.length && getPrimaryLeaderboardTieKey(rows[index], useMatchPointsRanking) === key) index += 1;
+    const group = rows.slice(start, index);
+    if (group.length === 2) {
+      resolvedRows.push(...resolveExactTwoTeamTie(group, pairResults, useMatchPointsRanking));
+      continue;
+    }
+    resolvedRows.push(...group);
+  }
+
+  resolvedRows.forEach((row, idx) => {
     row.rank = idx + 1;
   });
 
-  rows.forEach((row) => {
-    const peers = rows.filter((x) => x !== row && x.matchPoints === row.matchPoints && x.tiesWon === row.tiesWon);
-    if (peers.length === 1) {
+  resolvedRows.forEach((row) => {
+    const peers = resolvedRows.filter((x) => x !== row && getPrimaryLeaderboardTieKey(x, useMatchPointsRanking) === getPrimaryLeaderboardTieKey(row, useMatchPointsRanking));
+    if (peers.length === 1 && row.headToHead === "-") {
       row.headToHead = computeHeadToHeadSummary(pairResults, row.teamName, peers[0].teamName);
     }
   });
 
-  const qualifierCount = Math.min(defaultQualifierCount(tournament), rows.length);
-  rows.forEach((row, idx) => {
+  const qualifierCount = Math.min(defaultQualifierCount(tournament), resolvedRows.length);
+  resolvedRows.forEach((row, idx) => {
     row.qualified = idx < qualifierCount;
   });
 
-  return rows;
+  return resolvedRows;
 }
 
 function appendKnockoutRoundsIfNeeded(tournament, categoryId, fixturesOverride) {
@@ -1536,21 +1722,20 @@ function appendKnockoutRoundsIfNeeded(tournament, categoryId, fixturesOverride) 
   const needsKnockout = ["group_knockout", "round_robin_knockout"].includes(format) || isPickleballTeamLeague(tournament);
   if (!needsKnockout) return { changed: false, fixtures };
 
-  const existingKnockout = asArray(bucket.rounds).flat().some((m) => normalizeText(m?.stage) === "knockout");
-  if (existingKnockout) return { changed: false, fixtures };
+  const existingKnockout = getFirstKnockoutRoundIndex(bucket) >= 0;
+  if (existingKnockout && hasStartedKnockoutRounds(bucket)) return { changed: false, fixtures };
 
   const rows = computeLeaderboardRows(tournament, resolvedCategoryId, fixtures);
   const qualified = rows.filter((r) => r.qualified);
   if (qualified.length < 2) return { changed: false, fixtures };
 
-  let entrants = [];
-  if (qualified.length >= 4) {
-    entrants = [qualified[0]?.teamName, qualified[3]?.teamName, qualified[1]?.teamName, qualified[2]?.teamName].filter(Boolean);
-  } else {
-    entrants = qualified.slice(0, 2).map((r) => r.teamName).filter(Boolean);
-  }
+  const entrants = buildQualifiedKnockoutEntrants(tournament, qualified);
 
-  const bracket = createBracket(entrants, Object.fromEntries(entrants.map((e) => [e, [e]])), { stage: "knockout", type: isTeamTournament(tournament) ? "team_tie" : "match" });
+  const bracket = createBracket(entrants, Object.fromEntries(entrants.map((e) => [e, [e]])), {
+    stage: "knockout",
+    type: isTeamTournament(tournament) ? "team_tie" : "match",
+    shuffle: false,
+  });
   if (!bracket) return { changed: false, fixtures };
 
   bracket.rounds.forEach((round, idx) => {
@@ -1566,7 +1751,8 @@ function appendKnockoutRoundsIfNeeded(tournament, categoryId, fixturesOverride) 
     });
   });
 
-  bucket.rounds = [...asArray(bucket.rounds), ...bracket.rounds];
+  const baseRounds = getBaseRoundsWithoutKnockout(bucket);
+  bucket.rounds = [...baseRounds, ...bracket.rounds];
   bucket.totalRounds = asArray(bucket.rounds).length;
   return { changed: true, fixtures };
 }
