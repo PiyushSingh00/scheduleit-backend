@@ -8,6 +8,13 @@ const PORT = process.env.PORT || 4000; // backend will listen here
 const REGION = "eu-north-1"; // change if your DynamoDB region is different
 const USERS_TABLE = "ScheduleItUsers";
 const USER_DETAILS_TABLE="scheduleit-user-details";
+const SECURITY_QUESTIONS = {
+  first_school: "What was the name of your first school?",
+  childhood_nickname: "What was your childhood nickname?",
+  first_coach: "What was the name of your first coach?",
+  favorite_teacher: "What was the name of your favorite teacher?",
+  birth_city: "In which city were you born?",
+};
 // AWS SDK config (EC2 role will supply credentials automatically)
 AWS.config.update({ region: REGION });
 const ddb = new AWS.DynamoDB.DocumentClient();
@@ -18,6 +25,26 @@ function normalizePhone(value) {
   if (!digits) return "";
   if (digits.length === 10) return `91${digits}`;
   return digits;
+}
+
+function normalizeSecurityQuestionKey(value) {
+  const key = String(value || "").trim();
+  return Object.prototype.hasOwnProperty.call(SECURITY_QUESTIONS, key) ? key : "";
+}
+
+function normalizeSecurityAnswer(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+}
+
+async function getUserDetails(username) {
+  const result = await ddb.get({
+    TableName: USER_DETAILS_TABLE,
+    Key: { username },
+  }).promise();
+  return result.Item || null;
 }
 
 // Middleware
@@ -79,15 +106,27 @@ app.post("/api/register", async (req, res) => {
       email,
       phone,
       role,
+      securityQuestion,
+      securityAnswer,
       // photo is coming from frontend, but since we're not handling file upload here,
       // we can ignore it or accept a photoUrl string later
     } = req.body;
 
-    if (!username || !password || !name || !phone || !role) {
+    if (!username || !password || !name || !phone || !role || !securityQuestion || !securityAnswer) {
       return res.status(400).json({ message: "Missing required fields" });
     }
 
     const normalizedUsername = username.trim().toLowerCase();
+    const normalizedSecurityQuestion = normalizeSecurityQuestionKey(securityQuestion);
+    const normalizedSecurityAnswer = normalizeSecurityAnswer(securityAnswer);
+
+    if (!normalizedSecurityQuestion) {
+      return res.status(400).json({ message: "Invalid security question" });
+    }
+
+    if (!normalizedSecurityAnswer) {
+      return res.status(400).json({ message: "Security answer is required" });
+    }
 
     // 1. check if username already exists in auth table
     const existing = await ddb
@@ -103,6 +142,7 @@ app.post("/api/register", async (req, res) => {
 
     // 2. hash password
     const passwordHash = await bcrypt.hash(password, 10);
+    const securityAnswerHash = await bcrypt.hash(normalizedSecurityAnswer, 10);
 
     const now = new Date().toISOString();
 
@@ -133,6 +173,10 @@ const detailsPut = ddb
 
       role: role || "both",   // 👈 no restriction anymore
       mode: "player",         // 👈 DEFAULT LANDING MODE
+      securityQuestionKey: normalizedSecurityQuestion,
+      securityQuestionLabel: SECURITY_QUESTIONS[normalizedSecurityQuestion],
+      securityAnswerHash,
+      securityQuestionSetAt: now,
 
       photoUrl: null,
       createdAt: now,
@@ -150,6 +194,95 @@ const detailsPut = ddb
   } catch (err) {
     console.error("Register error:", err);
     return res.status(500).json({ message: "Internal server error" });
+  }
+});
+
+app.post("/api/forgot-password/question", async (req, res) => {
+  try {
+    const username = String(req.body?.username || "").trim().toLowerCase();
+    const phone = normalizePhone(req.body?.phone || "");
+
+    if (!username || !phone) {
+      return res.status(400).json({ message: "Username and phone are required" });
+    }
+
+    const details = await getUserDetails(username);
+    if (!details) {
+      return res.status(404).json({ message: "Account not found" });
+    }
+
+    const savedPhone = normalizePhone(
+      details.phone ||
+      details.phoneNumber ||
+      details.mobile ||
+      ""
+    );
+
+    if (!savedPhone || savedPhone !== phone) {
+      return res.status(403).json({ message: "Username and phone do not match" });
+    }
+
+    return res.json({
+      ok: true,
+      username,
+      phone,
+    });
+  } catch (err) {
+    console.error("Forgot password question error:", err);
+    return res.status(500).json({ message: "Server error" });
+  }
+});
+
+app.post("/api/forgot-password/reset", async (req, res) => {
+  try {
+    const username = String(req.body?.username || "").trim().toLowerCase();
+    const phone = normalizePhone(req.body?.phone || "");
+    const newPassword = String(req.body?.newPassword || "");
+
+    if (!username || !phone || !newPassword) {
+      return res.status(400).json({ message: "Username, phone, and new password are required" });
+    }
+
+    const userAuth = await ddb.get({
+      TableName: USERS_TABLE,
+      Key: { username },
+    }).promise();
+
+    if (!userAuth.Item) {
+      return res.status(404).json({ message: "Account not found" });
+    }
+
+    const details = await getUserDetails(username);
+    if (!details) {
+      return res.status(404).json({ message: "Account details not found" });
+    }
+
+    const savedPhone = normalizePhone(
+      details.phone ||
+      details.phoneNumber ||
+      details.mobile ||
+      ""
+    );
+
+    if (!savedPhone || savedPhone !== phone) {
+      return res.status(403).json({ message: "Username and phone do not match" });
+    }
+
+    const passwordHash = await bcrypt.hash(newPassword, 10);
+
+    await ddb.update({
+      TableName: USERS_TABLE,
+      Key: { username },
+      UpdateExpression: "SET passwordHash = :passwordHash",
+      ExpressionAttributeValues: {
+        ":passwordHash": passwordHash,
+      },
+    }).promise();
+
+    return res.json({ ok: true, message: "Password updated successfully" });
+  } catch (err) {
+    console.error("Forgot password reset error:", err);
+    return res.status(500).json({ message: "Server error" });
   }
 });
 
@@ -258,7 +391,5 @@ app.post("/api/user/mode", authMiddleware, async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 });
-
-
 
 

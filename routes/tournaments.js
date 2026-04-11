@@ -14,6 +14,11 @@ const router = express.Router();
 const REGION = process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || "eu-north-1";
 const TABLE = process.env.TOURNAMENTS_TABLE || "ScheduleItTournaments";
 const TEAM_EVENT_CATEGORY_ID = "__team_event__";
+const USER_DETAILS_TABLE = process.env.SCHEDULEIT_USER_DETAILS_TABLE || "scheduleit-user-details";
+const PENDING_PLAYER_LINKS_TABLE =
+  process.env.SCHEDULEIT_PENDING_PLAYER_LINKS_TABLE || "ScheduleItPendingPlayerLinks";
+const PENDING_PLAYER_LINKS_PARTITION_KEY =
+  process.env.SCHEDULEIT_PENDING_PLAYER_LINKS_PARTITION_KEY || "phoneKey";
 
 AWS.config.update({ region: REGION });
 const dynamo = new AWS.DynamoDB.DocumentClient();
@@ -43,6 +48,13 @@ function safeJson(value, fallback = null) {
 
 function normalizeText(value) {
   return String(value || "").trim().toLowerCase();
+}
+
+function normalizePhone(value) {
+  const digits = String(value || "").replace(/\D/g, "");
+  if (!digits) return "";
+  if (digits.length === 10) return `91${digits}`;
+  return digits;
 }
 
 function toFiniteNumber(value, fallback = null) {
@@ -80,6 +92,76 @@ function getAuthUserId(req) {
 
 function getAuthDisplayName(req, fallback = "") {
   return req.user?.name || req.user?.username || req.user?.email || fallback;
+}
+
+async function getCurrentUserProfile(req) {
+  const username = String(req.user?.username || "").trim().toLowerCase();
+  if (!username) return null;
+  try {
+    const result = await dynamo.get({
+      TableName: USER_DETAILS_TABLE,
+      Key: { username },
+    }).promise();
+    return result.Item || null;
+  } catch (err) {
+    console.warn("Could not load current user profile in tournaments route:", err?.message || err);
+    return null;
+  }
+}
+
+async function getPendingLinkedTournamentIds(req, profile = null) {
+  const phone = normalizePhone(
+    profile?.phone ||
+    profile?.phoneNumber ||
+    profile?.mobile ||
+    req.user?.phone ||
+    req.user?.phoneNumber ||
+    req.user?.mobile ||
+    ""
+  );
+
+  if (!phone) return new Set();
+
+  try {
+    let items = [];
+
+    try {
+      const result = await dynamo.query({
+        TableName: PENDING_PLAYER_LINKS_TABLE,
+        KeyConditionExpression: `${PENDING_PLAYER_LINKS_PARTITION_KEY} = :phone`,
+        ExpressionAttributeValues: {
+          ":phone": phone,
+        },
+      }).promise();
+      items = asArray(result.Items);
+    } catch (err) {
+      const message = String(err?.message || "");
+      if (!/Query condition missed key schema element|ValidationException/i.test(message)) {
+        throw err;
+      }
+
+      let ExclusiveStartKey;
+      do {
+        const result = await dynamo.scan({
+          TableName: PENDING_PLAYER_LINKS_TABLE,
+          FilterExpression: `${PENDING_PLAYER_LINKS_PARTITION_KEY} = :phone`,
+          ExpressionAttributeValues: {
+            ":phone": phone,
+          },
+          ExclusiveStartKey,
+        }).promise();
+        items.push(...asArray(result.Items));
+        ExclusiveStartKey = result.LastEvaluatedKey;
+      } while (ExclusiveStartKey);
+    }
+
+    return new Set(
+      items.map((item) => String(item?.tournamentId || "").trim()).filter(Boolean)
+    );
+  } catch (err) {
+    console.warn("Could not load pending player links:", err?.message || err);
+    return new Set();
+  }
 }
 
 function getOwnerCandidates(req) {
@@ -478,19 +560,36 @@ function findPlayerByIdentifiers(players, identifiers) {
   });
 }
 
-function tournamentIncludesUser(tournament, req) {
+function splitFixtureNames(value) {
+  const text = String(value || "").trim();
+  const upper = text.toUpperCase();
+  if (!text || upper === "BYE" || upper === "TBD") return [];
+  return text.split(" + ").map((entry) => entry.trim()).filter(Boolean);
+}
+
+function tournamentIncludesUser(tournament, req, profile = null) {
   const userId = String(getAuthUserId(req));
   const username = normalizeText(getAuthUsername(req));
-  const displayName = normalizeText(getAuthDisplayName(req));
+  const displayName = normalizeText(profile?.name || getAuthDisplayName(req));
+  const phone = normalizePhone(
+    profile?.phone ||
+    profile?.phoneNumber ||
+    profile?.mobile ||
+    req.user?.phone ||
+    req.user?.phoneNumber ||
+    req.user?.mobile ||
+    ""
+  );
 
-  if (!userId && !username && !displayName) return false;
+  if (!userId && !username && !displayName && !phone) return false;
 
   const players = getPlayers(tournament);
   if (
     players.some((p) =>
       String(p?.userId || "") === userId ||
       normalizeText(p?.username) === username ||
-      normalizeText(p?.playerName) === displayName
+      normalizeText(p?.playerName) === displayName ||
+      normalizePhone(p?.phone) === phone
     )
   ) {
     return true;
@@ -502,7 +601,8 @@ function tournamentIncludesUser(tournament, req) {
       asArray(team?.players).some((p) =>
         String(p?.userId || "") === userId ||
         normalizeText(p?.username) === username ||
-        normalizeText(p?.playerName) === displayName
+        normalizeText(p?.playerName) === displayName ||
+        normalizePhone(p?.phone) === phone
       )
     )
   ) {
@@ -510,7 +610,7 @@ function tournamentIncludesUser(tournament, req) {
   }
 
   const requests = getTeamRequests(tournament);
-  return requests.some((request) =>
+  const acceptedInviteMatch = requests.some((request) =>
     asArray(request?.invitedPlayers).some((invite) => {
       const accepted = normalizeText(invite?.inviteStatus || invite?.status) === "accepted";
       return (
@@ -518,11 +618,38 @@ function tournamentIncludesUser(tournament, req) {
         (
           String(invite?.userId || "") === userId ||
           normalizeText(invite?.inviteeUsername || invite?.username) === username ||
-          normalizeText(invite?.inviteeName || invite?.playerName) === displayName
+          normalizeText(invite?.inviteeName || invite?.playerName) === displayName ||
+          normalizePhone(invite?.phone || invite?.playerPhone) === phone
         )
       );
     })
   );
+
+  if (acceptedInviteMatch) return true;
+
+  const names = new Set([displayName, username].filter(Boolean));
+  const fixtures = tournament?.fixtures && typeof tournament.fixtures === "object" ? tournament.fixtures : { categories: {} };
+  const categories = fixtures.categories && typeof fixtures.categories === "object" ? fixtures.categories : {};
+
+  return Object.values(categories).some((bucket) => {
+    const rounds = asArray(bucket?.rounds).length ? asArray(bucket.rounds) : [asArray(bucket?.matches)];
+    return rounds.some((round) =>
+      asArray(round).some((match) => {
+        const topLevelNames = [
+          ...asArray(match?.homePlayers),
+          ...asArray(match?.awayPlayers),
+          ...splitFixtureNames(match?.home),
+          ...splitFixtureNames(match?.away),
+        ];
+        if (topLevelNames.some((name) => names.has(normalizeText(name)))) return true;
+        return asArray(match?.submatches).some((submatch) =>
+          [...asArray(submatch?.homePlayers), ...asArray(submatch?.awayPlayers)].some((name) =>
+            names.has(normalizeText(name))
+          )
+        );
+      })
+    );
+  });
 }
 
 async function getTournament(tournamentId) {
@@ -614,8 +741,13 @@ router.get("/", async (req, res) => {
 router.get("/mine", requireAuth, async (req, res) => {
   try {
     const all = await listTournamentAggregates();
+    const profile = await getCurrentUserProfile(req);
+    const linkedTournamentIds = await getPendingLinkedTournamentIds(req, profile);
     const items = asArray(all)
-      .filter((t) => tournamentIncludesUser(t, req))
+      .filter((t) =>
+        linkedTournamentIds.has(String(t?.tournamentId || "").trim()) ||
+        tournamentIncludesUser(t, req, profile)
+      )
       .sort((a, b) => String(b?.createdAt || "").localeCompare(String(a?.createdAt || "")))
       .map((t) => buildPublicTournamentView(t, { includeAccessCode: true }));
 
