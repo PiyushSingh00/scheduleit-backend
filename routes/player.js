@@ -211,6 +211,19 @@ async function getPendingLinkRowsForCurrentUser(req, profile = null, tournamentI
 }
 
 async function getCurrentUserProfile(req) {
+  const directUsername = String(req.user?.username || "").trim().toLowerCase();
+  if (directUsername) {
+    try {
+      const direct = await ddb.get({
+        TableName: USER_DETAILS_TABLE,
+        Key: { username: directUsername },
+      }).promise();
+      if (direct.Item) return direct.Item;
+    } catch (err) {
+      console.warn("Direct user profile lookup failed in player route:", err?.message || err);
+    }
+  }
+
   const directPhone = normalizePhone(
     req.user?.phone ||
     req.user?.phoneNumber ||
