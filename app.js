@@ -222,15 +222,10 @@ app.post("/api/forgot-password/question", async (req, res) => {
       return res.status(403).json({ message: "Username and phone do not match" });
     }
 
-    const questionKey = normalizeSecurityQuestionKey(details.securityQuestionKey);
-    if (!questionKey || !details.securityAnswerHash) {
-      return res.status(409).json({ message: "Password reset is not enabled for this account yet" });
-    }
-
     return res.json({
       ok: true,
-      securityQuestionKey: questionKey,
-      securityQuestionLabel: details.securityQuestionLabel || SECURITY_QUESTIONS[questionKey],
+      username,
+      phone,
     });
   } catch (err) {
     console.error("Forgot password question error:", err);
@@ -242,11 +237,10 @@ app.post("/api/forgot-password/reset", async (req, res) => {
   try {
     const username = String(req.body?.username || "").trim().toLowerCase();
     const phone = normalizePhone(req.body?.phone || "");
-    const securityAnswer = normalizeSecurityAnswer(req.body?.securityAnswer || "");
     const newPassword = String(req.body?.newPassword || "");
 
-    if (!username || !phone || !securityAnswer || !newPassword) {
-      return res.status(400).json({ message: "Username, phone, security answer, and new password are required" });
+    if (!username || !phone || !newPassword) {
+      return res.status(400).json({ message: "Username, phone, and new password are required" });
     }
 
     const userAuth = await ddb.get({
@@ -272,15 +266,6 @@ app.post("/api/forgot-password/reset", async (req, res) => {
 
     if (!savedPhone || savedPhone !== phone) {
       return res.status(403).json({ message: "Username and phone do not match" });
-    }
-
-    if (!details.securityAnswerHash) {
-      return res.status(409).json({ message: "Password reset is not enabled for this account yet" });
-    }
-
-    const answerMatches = await bcrypt.compare(securityAnswer, details.securityAnswerHash);
-    if (!answerMatches) {
-      return res.status(403).json({ message: "Incorrect security answer" });
     }
 
     const passwordHash = await bcrypt.hash(newPassword, 10);
@@ -406,6 +391,5 @@ app.post("/api/user/mode", authMiddleware, async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 });
-
 
 

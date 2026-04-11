@@ -1747,6 +1747,14 @@ function getPosterSettingsDefaults(tournament = {}) {
     tagline: "",
     socialHandle: "",
     customFields: [],
+    fontSizes: {
+      organizerName: 34,
+      sponsorNames: 24,
+      venueLabel: 24,
+      cityName: 24,
+      tagline: 30,
+      socialHandle: 24,
+    },
     visibility: {
       organizerName: true,
       sponsorNames: true,
@@ -1764,6 +1772,12 @@ function normalizePosterSettings(input, tournament = {}) {
   const defaults = getPosterSettingsDefaults(tournament);
   const raw = input && typeof input === "object" ? cloneJson(input) : {};
   const visibility = raw?.visibility && typeof raw.visibility === "object" ? raw.visibility : {};
+  const fontSizes = raw?.fontSizes && typeof raw.fontSizes === "object" ? raw.fontSizes : {};
+  const normalizeFontSize = (value, fallback) => {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return fallback;
+    return Math.max(16, Math.min(52, Math.round(num)));
+  };
 
   const sponsorNames = Array.isArray(raw?.sponsorNames)
     ? raw.sponsorNames
@@ -1774,12 +1788,15 @@ function normalizePosterSettings(input, tournament = {}) {
 
   const customFields = asArray(raw?.customFields)
     .map((field) => ({
+      type: String(field?.type || "pair").trim().toLowerCase() === "line" ? "line" : "pair",
       label: String(field?.label || "").trim().slice(0, 40),
       value: String(field?.value || "").trim().slice(0, 120),
+      text: String(field?.text || "").trim().slice(0, 180),
       position: String(field?.position || "bottom").trim().toLowerCase() === "top" ? "top" : "bottom",
       enabled: field?.enabled !== false,
+      fontSize: normalizeFontSize(field?.fontSize, 24),
     }))
-    .filter((field) => field.label && field.value)
+    .filter((field) => (field.type === "line" ? field.text : field.label && field.value))
     .slice(0, 4);
 
   return {
@@ -1790,6 +1807,14 @@ function normalizePosterSettings(input, tournament = {}) {
     tagline: String(raw?.tagline || defaults.tagline).trim().slice(0, 180),
     socialHandle: String(raw?.socialHandle || defaults.socialHandle).trim().slice(0, 80),
     customFields,
+    fontSizes: {
+      organizerName: normalizeFontSize(fontSizes.organizerName, defaults.fontSizes.organizerName),
+      sponsorNames: normalizeFontSize(fontSizes.sponsorNames, defaults.fontSizes.sponsorNames),
+      venueLabel: normalizeFontSize(fontSizes.venueLabel, defaults.fontSizes.venueLabel),
+      cityName: normalizeFontSize(fontSizes.cityName, defaults.fontSizes.cityName),
+      tagline: normalizeFontSize(fontSizes.tagline, defaults.fontSizes.tagline),
+      socialHandle: normalizeFontSize(fontSizes.socialHandle, defaults.fontSizes.socialHandle),
+    },
     visibility: {
       organizerName: Boolean(visibility.organizerName ?? defaults.visibility.organizerName),
       sponsorNames: Boolean(visibility.sponsorNames ?? defaults.visibility.sponsorNames),
