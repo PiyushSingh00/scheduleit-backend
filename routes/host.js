@@ -1363,14 +1363,24 @@ function computeWinnerFromSchema(schema, scorePayload, homeLabel, awayLabel) {
   return { status: "pending", winnerSide: null, winnerName: null, reason: "Unknown logic", aValue: a, bValue: b };
 }
 
+function isTeamTieAggregateScorePayload(scorePayload) {
+  return Boolean(scorePayload?.state?.meta?.teamTieState && typeof scorePayload.state.meta.teamTieState === "object");
+}
+
 function scoreIndividualMatch(match, schema, scorePayload) {
   const payload = cloneJson(scorePayload || {});
-  const computed = payload?.computed && typeof payload.computed === "object"
+  const computed = isTeamTieAggregateScorePayload(payload)
     ? {
-        ...payload.computed,
-        ...computeWinnerFromSchema(schema, payload, match?.home || "Home", match?.away || "Away"),
+        ...(payload?.computed && typeof payload.computed === "object" ? payload.computed : {}),
+        aValue: Number(payload?.computed?.aValue ?? payload?.state?.A?.points ?? 0),
+        bValue: Number(payload?.computed?.bValue ?? payload?.state?.B?.points ?? 0),
       }
-    : computeWinnerFromSchema(schema, payload, match?.home || "Home", match?.away || "Away");
+    : payload?.computed && typeof payload.computed === "object"
+      ? {
+          ...payload.computed,
+          ...computeWinnerFromSchema(schema, payload, match?.home || "Home", match?.away || "Away"),
+        }
+      : computeWinnerFromSchema(schema, payload, match?.home || "Home", match?.away || "Away");
 
   return {
     config: payload?.config || {},
