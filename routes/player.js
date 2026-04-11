@@ -789,13 +789,197 @@ function getCurrentUserTeamNames(tournament, req, profile = null, pendingLinks =
   return values;
 }
 
+function getSubmatchSnapshot(submatch) {
+  return submatch?.score?.state?.meta?.categorySnapshot || submatch?.categorySnapshot || null;
+}
+
+function getTeamTieStateFromBackend(match) {
+  const direct = match?.score?.state?.meta?.teamTieState;
+  if (direct && typeof direct === "object") return cloneJson(direct);
+
+  const submatches = asArray(match?.submatches);
+  const categories = submatches
+    .map((submatch, index) => {
+      const snapshot = getSubmatchSnapshot(submatch);
+      if (snapshot && typeof snapshot === "object") return cloneJson(snapshot);
+
+      const home = getDisplayScoreForSide(submatch, "home");
+      const away = getDisplayScoreForSide(submatch, "away");
+      const winnerSide = String(
+        submatch?.score?.computed?.winnerSide || submatch?.score?.winnerSide || ""
+      ).toUpperCase();
+
+      if (home == null && away == null && !winnerSide && !submatch?.status) return null;
+
+      return {
+        name:
+          submatch?.label ||
+          submatch?.title ||
+          submatch?.categoryName ||
+          submatch?.eventName ||
+          `Submatch ${index + 1}`,
+        homePlayer: asArray(submatch?.homePlayers).join(" + ") || String(submatch?.homePlayer || match?.home || "Home"),
+        awayPlayer: asArray(submatch?.awayPlayers).join(" + ") || String(submatch?.awayPlayer || match?.away || "Away"),
+        homeScore: Number(home || 0),
+        awayScore: Number(away || 0),
+        winnerSide: winnerSide || null,
+        sportKey: String(snapshot?.sportKey || "").trim(),
+        sportData: snapshot?.sportData || null,
+        categoryLocked: Boolean(snapshot?.categoryLocked),
+      };
+    })
+    .filter(Boolean);
+
+  if (!categories.length) return null;
+
+  return {
+    categories,
+    tieLocked: Boolean(match?.score?.computed?.tieLocked),
+  };
+}
+
+function getTeamTieCategoryPoints(category) {
+  const sportKey = String(category?.sportKey || "").trim().toLowerCase();
+  const data = category?.sportData || {};
+
+  if (sportKey === "pickleball") {
+    return asArray(data?.sets).reduce(
+      (acc, set) => {
+        acc.home += Number(set?.homePoints || 0);
+        acc.away += Number(set?.awayPoints || 0);
+        return acc;
+      },
+      { home: 0, away: 0 }
+    );
+  }
+
+  if (sportKey === "badminton") {
+    return asArray(data?.games).reduce(
+      (acc, game) => {
+        acc.home += Number(game?.a ?? game?.home ?? 0);
+        acc.away += Number(game?.b ?? game?.away ?? 0);
+        return acc;
+      },
+      { home: 0, away: 0 }
+    );
+  }
+
+  if (sportKey === "tennis") {
+    return asArray(data?.sets).reduce(
+      (acc, setRow) => {
+        acc.home += Number(setRow?.a ?? setRow?.home ?? 0);
+        acc.away += Number(setRow?.b ?? setRow?.away ?? 0);
+        return acc;
+      },
+      { home: 0, away: 0 }
+    );
+  }
+
+  if (sportKey === "football") {
+    return {
+      home: Number(data?.homeGoals ?? data?.a ?? category?.homeScore ?? 0),
+      away: Number(data?.awayGoals ?? data?.b ?? category?.awayScore ?? 0),
+    };
+  }
+
+  if (sportKey === "cricket") {
+    return {
+      home: Number(data?.homeRuns ?? data?.a ?? category?.homeScore ?? 0),
+      away: Number(data?.awayRuns ?? data?.b ?? category?.awayScore ?? 0),
+    };
+  }
+
+  return {
+    home: Number(category?.homeScore ?? category?.score?.home ?? 0),
+    away: Number(category?.awayScore ?? category?.score?.away ?? 0),
+  };
+}
+
+function getLineupAssignmentsForMatch(tournament, match, side) {
+  const directAssignments = asArray(match?.lineups?.[side]?.assignments);
+  if (directAssignments.length) return directAssignments;
+
+  const tieId = String(match?.tieId || match?.matchId || "").trim();
+  if (!tieId) return [];
+
+  const lineupsState = getLineupsState(tournament);
+  const savedTie = asArray(lineupsState?.ties).find(
+    (tie) => String(tie?.tieId || tie?.matchId || "").trim() === tieId
+  );
+  return asArray(savedTie?.assignments);
+}
+
+function normalizeAssignmentPlayers(assignment) {
+  if (!assignment || typeof assignment !== "object") return [];
+  const rawPlayers = Array.isArray(assignment?.players)
+    ? assignment.players
+    : Array.isArray(assignment?.playerNames)
+      ? assignment.playerNames
+      : [];
+
+  return rawPlayers
+    .map((player) =>
+      typeof player === "object"
+        ? String(player?.playerName || player?.name || player?.username || "").trim()
+        : String(player || "").trim()
+    )
+    .filter(Boolean);
+}
+
+function categoriesFromTeamTieState(teamTieState, match) {
+  return asArray(teamTieState?.categories).map((category, index) => {
+    const totals = getTeamTieCategoryPoints(category);
+    const hasProgress =
+      Number(totals.home || 0) > 0 ||
+      Number(totals.away || 0) > 0 ||
+      Number(category?.sportData?.currentSetIndex) >= 0 ||
+      Boolean(category?.winnerSide);
+
+    const homePlayers = asArray(category?.homePlayersSelected).length
+      ? asArray(category.homePlayersSelected).map(String)
+      : splitFixtureNames(category?.homePlayer || match?.home || "Home");
+    const awayPlayers = asArray(category?.awayPlayersSelected).length
+      ? asArray(category.awayPlayersSelected).map(String)
+      : splitFixtureNames(category?.awayPlayer || match?.away || "Away");
+
+    return {
+      categoryId: String(category?.categoryId || category?.id || `CAT-${index + 1}`).trim(),
+      categoryName: String(category?.name || category?.eventName || `Submatch ${index + 1}`).trim(),
+      eventName: String(category?.eventName || category?.name || `Submatch ${index + 1}`).trim(),
+      label: String(category?.name || category?.eventName || `Submatch ${index + 1}`).trim(),
+      homePlayers,
+      awayPlayers,
+      homePlayer: homePlayers.join(" + ") || String(match?.home || "Home"),
+      awayPlayer: awayPlayers.join(" + ") || String(match?.away || "Away"),
+      score: {
+        state: {
+          A: { points: Number(totals.home || 0) },
+          B: { points: Number(totals.away || 0) },
+          meta: { categorySnapshot: cloneJson(category) },
+        },
+        computed: {
+          status: category?.winnerSide ? "completed" : (hasProgress ? "live" : "pending"),
+          winnerSide: category?.winnerSide || null,
+        },
+      },
+      winnerSide: category?.winnerSide || null,
+      categorySnapshot: cloneJson(category),
+      synthesizedFromTeamTieState: true,
+    };
+  });
+}
+
 function buildSyntheticSubmatchesFromLineups(tournament, match) {
   const stored = asArray(match?.submatches);
   if (stored.length) return stored;
 
+  const backendTieState = getTeamTieStateFromBackend(match);
+  const fromBackendState = categoriesFromTeamTieState(backendTieState, match);
+  if (fromBackendState.length) return fromBackendState;
+
   const defs = getTieCategoryDefinitions(tournament);
-  const homeAssignments = asArray(match?.lineups?.home?.assignments);
-  const awayAssignments = asArray(match?.lineups?.away?.assignments);
+  const homeAssignments = getLineupAssignmentsForMatch(tournament, match, "home");
+  const awayAssignments = getLineupAssignmentsForMatch(tournament, match, "away");
   const count = Math.max(defs.length, homeAssignments.length, awayAssignments.length, 0);
   if (!count) return [];
 
@@ -806,16 +990,8 @@ function buildSyntheticSubmatchesFromLineups(tournament, match) {
     };
     const homeAssignment = homeAssignments.find((item) => Number(item?.scoreIndex) === index) || homeAssignments[index] || {};
     const awayAssignment = awayAssignments.find((item) => Number(item?.scoreIndex) === index) || awayAssignments[index] || {};
-    const homePlayers = asArray(homeAssignment?.players).map((player) =>
-      typeof player === "object"
-        ? String(player?.playerName || player?.name || player?.username || "").trim()
-        : String(player || "").trim()
-    ).filter(Boolean);
-    const awayPlayers = asArray(awayAssignment?.players).map((player) =>
-      typeof player === "object"
-        ? String(player?.playerName || player?.name || player?.username || "").trim()
-        : String(player || "").trim()
-    ).filter(Boolean);
+    const homePlayers = normalizeAssignmentPlayers(homeAssignment);
+    const awayPlayers = normalizeAssignmentPlayers(awayAssignment);
 
     return {
       categoryId: String(def?.categoryId || `CAT-${index + 1}`).trim(),
@@ -824,6 +1000,8 @@ function buildSyntheticSubmatchesFromLineups(tournament, match) {
       label: String(def?.eventName || def?.categoryId || `Category ${index + 1}`).trim(),
       homePlayers,
       awayPlayers,
+      homePlayer: homePlayers.join(" + ") || String(match?.home || "Home"),
+      awayPlayer: awayPlayers.join(" + ") || String(match?.away || "Away"),
       score: null,
       winnerSide: null,
       synthesizedFromLineups: true,
@@ -862,7 +1040,20 @@ function getTeamMatchDisplayTotals(match) {
     awayPoints: Number(match?.matchPointsAway || 0) || 0,
   };
 
-  asArray(match?.submatches).forEach((submatch) => {
+  const submatches = asArray(match?.submatches).length
+    ? asArray(match?.submatches)
+    : categoriesFromTeamTieState(getTeamTieStateFromBackend(match), match);
+
+  if (!totals.homePoints && !totals.awayPoints && submatches.length) {
+    submatches.forEach((submatch) => {
+      const home = Number(getDisplayScoreForSide(submatch, "home") || 0) || 0;
+      const away = Number(getDisplayScoreForSide(submatch, "away") || 0) || 0;
+      totals.homePoints += home;
+      totals.awayPoints += away;
+    });
+  }
+
+  submatches.forEach((submatch) => {
     const winnerSide = normalizeText(submatch?.winnerSide || submatch?.score?.computed?.winnerSide || "");
     if (winnerSide === "a" || winnerSide === "home") totals.homeWins += 1;
     if (winnerSide === "b" || winnerSide === "away") totals.awayWins += 1;
