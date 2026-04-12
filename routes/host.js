@@ -1,6 +1,7 @@
 const express = require("express");
 const { v4: uuid } = require("uuid");
 const AWS = require("aws-sdk");
+const zlib = require("zlib");
 const { requireAuth } = require("../middleware/auth");
 
 const {
@@ -46,6 +47,27 @@ function nowIso() {
 
 function cloneJson(value) {
   return value == null ? value : JSON.parse(JSON.stringify(value));
+}
+
+function compressJsonPayload(value) {
+  try {
+    const json = JSON.stringify(value == null ? null : value);
+    return zlib.gzipSync(Buffer.from(json, "utf8")).toString("base64");
+  } catch {
+    return "";
+  }
+}
+
+function decompressJsonPayload(value, fallback = null) {
+  const raw = String(value || "").trim();
+  if (!raw) return fallback;
+  try {
+    const buffer = Buffer.from(raw, "base64");
+    const json = zlib.gunzipSync(buffer).toString("utf8");
+    return JSON.parse(json);
+  } catch {
+    return fallback;
+  }
 }
 
 function normalizeText(value) {
@@ -2175,9 +2197,13 @@ function getLineupsForResponse(tournament, req, categoryId) {
 }
 
 function buildFixtureUndoSnapshot(tournament, req, action = "", meta = {}) {
-  return {
+  const payload = {
     fixtures: normalizeFixtures(tournament?.fixtures || { categories: {} }),
     leaderboardSnapshotByCategory: cloneJson(tournament?.leaderboardSnapshotByCategory || {}),
+  };
+
+  return {
+    payload: compressJsonPayload(payload),
     savedAt: nowIso(),
     savedBy: getAuthUsername(req),
     action: String(action || "fixture_change").trim() || "fixture_change",
@@ -3753,7 +3779,16 @@ router.post("/tournaments/:tournamentId/fixtures/undo", requireAuth, async (req,
     if (!assertOwner(req, tournament, res)) return;
 
     const snapshot = tournament?.fixturesUndoSnapshot;
-    if (!snapshot?.fixtures || typeof snapshot.fixtures !== "object") {
+    const decodedPayload =
+      decompressJsonPayload(snapshot?.payload, null) ||
+      (snapshot?.fixtures && typeof snapshot.fixtures === "object"
+        ? {
+            fixtures: normalizeFixtures(snapshot.fixtures || { categories: {} }),
+            leaderboardSnapshotByCategory: cloneJson(snapshot.leaderboardSnapshotByCategory || {}),
+          }
+        : null);
+
+    if (!decodedPayload?.fixtures || typeof decodedPayload.fixtures !== "object") {
       return res.status(409).json({ message: "No previous fixture version available to restore" });
     }
 
@@ -3763,8 +3798,8 @@ router.post("/tournaments/:tournamentId/fixtures/undo", requireAuth, async (req,
     });
 
     const updated = await updateTournamentFields(req.params.tournamentId, {
-      fixtures: normalizeFixtures(snapshot.fixtures || { categories: {} }),
-      leaderboardSnapshotByCategory: cloneJson(snapshot.leaderboardSnapshotByCategory || {}),
+      fixtures: normalizeFixtures(decodedPayload.fixtures || { categories: {} }),
+      leaderboardSnapshotByCategory: cloneJson(decodedPayload.leaderboardSnapshotByCategory || {}),
       fixturesUndoSnapshot: currentSnapshot,
       fixturesUpdatedAt: nowIso(),
       updatedBy: getAuthUsername(req),
