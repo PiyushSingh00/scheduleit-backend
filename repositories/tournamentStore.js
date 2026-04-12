@@ -341,7 +341,7 @@ async function batchWriteWithRetry(requestItems) {
   throw new Error('batchWrite still has unprocessed items after retries');
 }
 
-async function queryAll(tableName, keyConditionExpression, expressionAttributeValues) {
+async function queryAll(tableName, keyConditionExpression, expressionAttributeValues, options = {}) {
   let items = [];
   let ExclusiveStartKey;
   do {
@@ -349,6 +349,7 @@ async function queryAll(tableName, keyConditionExpression, expressionAttributeVa
       TableName: tableName,
       KeyConditionExpression: keyConditionExpression,
       ExpressionAttributeValues: expressionAttributeValues,
+      ConsistentRead: options.consistentRead === true,
       ExclusiveStartKey,
     }).promise();
     items = items.concat(result.Items || []);
@@ -369,12 +370,20 @@ async function scanAll(tableName) {
 }
 
 async function getLegacyTournament(tournamentId) {
-  const result = await ddb.get({ TableName: LEGACY_TABLE, Key: { tournamentId } }).promise();
+  const result = await ddb.get({
+    TableName: LEGACY_TABLE,
+    Key: { tournamentId },
+    ConsistentRead: true,
+  }).promise();
   return result.Item || null;
 }
 
 async function getTournamentMeta(tournamentId) {
-  const result = await ddb.get({ TableName: META_TABLE, Key: { tournamentId } }).promise();
+  const result = await ddb.get({
+    TableName: META_TABLE,
+    Key: { tournamentId },
+    ConsistentRead: true,
+  }).promise();
   return result.Item || null;
 }
 
@@ -385,7 +394,12 @@ async function saveTournamentMeta(meta) {
 }
 
 async function queryTournamentMatches(tournamentId) {
-  const rows = await queryAll(MATCH_TABLE, 'tournamentId = :t', { ':t': tournamentId });
+  const rows = await queryAll(
+    MATCH_TABLE,
+    'tournamentId = :t',
+    { ':t': tournamentId },
+    { consistentRead: true }
+  );
   return rows.sort((a, b) => String(a.matchKey || '').localeCompare(String(b.matchKey || '')));
 }
 
