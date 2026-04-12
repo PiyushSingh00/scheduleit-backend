@@ -3708,6 +3708,54 @@ router.post("/tournaments/:tournamentId/fixtures/update", requireAuth, async (re
   }
 });
 
+router.post("/tournaments/:tournamentId/fixtures/category-update", requireAuth, async (req, res) => {
+  try {
+    const tournament = await getTournament(req.params.tournamentId);
+    if (!assertOwner(req, tournament, res)) return;
+
+    const categoryId = String(req.body?.categoryId || "").trim();
+    if (!categoryId) {
+      return res.status(400).json({ message: "categoryId is required" });
+    }
+
+    const bucketInput = req.body?.bucket;
+    if (!bucketInput || typeof bucketInput !== "object") {
+      return res.status(400).json({ message: "bucket is required" });
+    }
+
+    const fixtures = normalizeFixtures(tournament.fixtures || { categories: {} });
+    const nextBucket = cloneJson(bucketInput);
+    nextBucket.categoryId = categoryId;
+    nextBucket.rounds = asArray(nextBucket.rounds).map((round) => asArray(round).map((match) => ensureMatchMeta(match)));
+    if (Array.isArray(nextBucket.matches)) {
+      nextBucket.matches = nextBucket.matches.map((match) => ensureMatchMeta(match));
+    }
+    if (!Array.isArray(nextBucket.matches) && Array.isArray(nextBucket.rounds?.[0])) {
+      nextBucket.matches = nextBucket.rounds[0];
+    }
+    nextBucket.totalRounds = toFiniteNumber(nextBucket.totalRounds, null) || asArray(nextBucket.rounds).length;
+
+    fixtures.categories = fixtures.categories || {};
+    fixtures.categories[categoryId] = nextBucket;
+
+    const updated = await persistManualFixtureChange(tournament, req, fixtures, {
+      action: "update_fixture_category",
+      categoryId,
+      captureUndo: false,
+    });
+
+    return res.json({
+      ok: true,
+      categoryId,
+      bucket: updated.fixtures?.categories?.[categoryId] || nextBucket,
+      fixtures: updated.fixtures,
+    });
+  } catch (err) {
+    console.error("Host POST fixture category update error:", err);
+    return res.status(500).json({ message: "Server error" });
+  }
+});
+
 router.post("/tournaments/:tournamentId/fixtures/generate-league", requireAuth, async (req, res) => {
   try {
     const tournament = await getTournament(req.params.tournamentId);
