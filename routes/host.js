@@ -39,6 +39,7 @@ const PENDING_PLAYER_LINKS_SORT_KEY =
   process.env.SCHEDULEIT_PENDING_PLAYER_LINKS_SORT_KEY || "linkKey";
 const TEAM_EVENT_CATEGORY_ID = "__team_event__";
 const REGION = process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || "eu-north-1";
+const TOURNAMENT_META_TABLE = process.env.TOURNAMENT_META_TABLE || "ScheduleItTournamentMeta";
 AWS.config.update({ region: REGION });
 
 function nowIso() {
@@ -363,6 +364,17 @@ async function getCurrentUserProfileForAccess(req) {
     console.warn("Could not load current user profile for access:", err?.message || err);
     return null;
   }
+}
+
+async function scanAllItems(tableName) {
+  const items = [];
+  let ExclusiveStartKey;
+  do {
+    const result = await dynamo.scan({ TableName: tableName, ExclusiveStartKey }).promise();
+    items.push(...asArray(result.Items));
+    ExclusiveStartKey = result.LastEvaluatedKey;
+  } while (ExclusiveStartKey);
+  return items;
 }
 
 async function isUmpireForTournament(req, tournament) {
@@ -2353,7 +2365,20 @@ router.post("/tournaments", requireAuth, async (req, res) => {
 
 router.get("/tournaments", requireAuth, async (req, res) => {
   try {
-    const items = await listTournamentAggregates();
+    let items = [];
+
+    if (USE_SPLIT_TABLES) {
+      try {
+        items = await scanAllItems(TOURNAMENT_META_TABLE);
+      } catch (metaErr) {
+        console.warn("Host tournaments meta scan failed, falling back to aggregate list:", metaErr?.message || metaErr);
+      }
+    }
+
+    if (!items.length) {
+      items = await listTournamentAggregates();
+    }
+
     const mine = asArray(items).filter((t) => isOwner(req, t));
     return res.json(mine);
   } catch (err) {
@@ -3674,6 +3699,7 @@ router.post("/tournaments/:tournamentId/fixtures/update", requireAuth, async (re
     }
     const updated = await persistManualFixtureChange(tournament, req, incoming, {
       action: "update_fixtures",
+      captureUndo: false,
     });
     return res.json(updated.fixtures);
   } catch (err) {
