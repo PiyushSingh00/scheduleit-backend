@@ -3718,22 +3718,68 @@ router.post("/tournaments/:tournamentId/fixtures/category-update", requireAuth, 
       return res.status(400).json({ message: "categoryId is required" });
     }
 
-    const bucketInput = req.body?.bucket;
-    if (!bucketInput || typeof bucketInput !== "object") {
-      return res.status(400).json({ message: "bucket is required" });
+    const fixtures = normalizeFixtures(tournament.fixtures || { categories: {} });
+    const currentBucket = cloneJson(fixtures.categories?.[categoryId] || null);
+    if (!currentBucket) {
+      return res.status(404).json({ message: "Fixture category not found" });
     }
 
-    const fixtures = normalizeFixtures(tournament.fixtures || { categories: {} });
-    const nextBucket = cloneJson(bucketInput);
-    nextBucket.categoryId = categoryId;
-    nextBucket.rounds = asArray(nextBucket.rounds).map((round) => asArray(round).map((match) => ensureMatchMeta(match)));
-    if (Array.isArray(nextBucket.matches)) {
-      nextBucket.matches = nextBucket.matches.map((match) => ensureMatchMeta(match));
+    let nextBucket = null;
+    const edits = asArray(req.body?.edits);
+    if (edits.length) {
+      const rounds = asArray(currentBucket.rounds).map((round) =>
+        asArray(round).map((match) => ensureMatchMeta(cloneJson(match)))
+      );
+
+      edits.forEach((edit) => {
+        const roundIndex = Number(edit?.roundIndex);
+        const matchIndex = Number(edit?.matchIndex);
+        if (!Number.isInteger(roundIndex) || roundIndex < 0 || !Number.isInteger(matchIndex) || matchIndex < 0) return;
+        const match = rounds?.[roundIndex]?.[matchIndex];
+        if (!match) return;
+
+        const home = String(edit?.home ?? match.home ?? "").trim();
+        const away = String(edit?.away ?? match.away ?? "").trim();
+        match.home = home;
+        match.away = away;
+        match.homePlayers = home ? [home] : [];
+        match.awayPlayers = away ? [away] : [];
+        match.date = String(edit?.date ?? match.date ?? "").trim();
+        match.time = String(edit?.time ?? match.time ?? "").trim();
+        match.court = String(edit?.court ?? match.court ?? "").trim();
+      });
+
+      nextBucket = {
+        ...currentBucket,
+        categoryId,
+        rounds,
+        matches: Array.isArray(rounds?.[0]) ? rounds[0] : asArray(currentBucket.matches),
+        totalRounds: asArray(rounds).length,
+      };
+
+      if (currentBucket.knockout && Array.isArray(currentBucket.knockout.rounds)) {
+        nextBucket.knockout = {
+          ...currentBucket.knockout,
+          rounds: rounds.slice(1),
+          totalRounds: Math.max(0, rounds.length - 1),
+        };
+      }
+    } else {
+      const bucketInput = req.body?.bucket;
+      if (!bucketInput || typeof bucketInput !== "object") {
+        return res.status(400).json({ message: "bucket or edits are required" });
+      }
+      nextBucket = cloneJson(bucketInput);
+      nextBucket.categoryId = categoryId;
+      nextBucket.rounds = asArray(nextBucket.rounds).map((round) => asArray(round).map((match) => ensureMatchMeta(match)));
+      if (Array.isArray(nextBucket.matches)) {
+        nextBucket.matches = nextBucket.matches.map((match) => ensureMatchMeta(match));
+      }
+      if (!Array.isArray(nextBucket.matches) && Array.isArray(nextBucket.rounds?.[0])) {
+        nextBucket.matches = nextBucket.rounds[0];
+      }
+      nextBucket.totalRounds = toFiniteNumber(nextBucket.totalRounds, null) || asArray(nextBucket.rounds).length;
     }
-    if (!Array.isArray(nextBucket.matches) && Array.isArray(nextBucket.rounds?.[0])) {
-      nextBucket.matches = nextBucket.rounds[0];
-    }
-    nextBucket.totalRounds = toFiniteNumber(nextBucket.totalRounds, null) || asArray(nextBucket.rounds).length;
 
     fixtures.categories = fixtures.categories || {};
     fixtures.categories[categoryId] = nextBucket;
