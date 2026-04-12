@@ -6,6 +6,7 @@ const { requireAuth } = require("../middleware/auth");
 const {
   getTournamentAggregate,
   listTournamentAggregates,
+  listTournamentMetas,
   saveTournamentAggregate,
 } = require("../repositories/tournamentStore");
 
@@ -472,6 +473,10 @@ function buildPublicTournamentView(tournament, options = {}) {
   const requests = getTeamRequests(tournament);
   const categories = normalizeCategories(tournament?.categories).map(normalizeCategoryItem);
   const fixtures = normalizeFixtures(tournament?.fixtures || { categories: {} });
+  const fixtureConfigByCategory =
+    tournament?.fixtureConfigByCategory && typeof tournament.fixtureConfigByCategory === "object"
+      ? tournament.fixtureConfigByCategory
+      : {};
 
   const visible = {
     tournamentId: tournament.tournamentId,
@@ -497,7 +502,10 @@ function buildPublicTournamentView(tournament, options = {}) {
     totalTeams: teams.length,
     playersCount: players.length,
     teamsCount: teams.length,
-    fixturesAvailable: Boolean(fixtures && fixtures.categories && Object.keys(fixtures.categories).length),
+    fixturesAvailable: Boolean(
+      (fixtures && fixtures.categories && Object.keys(fixtures.categories).length) ||
+      Object.keys(fixtureConfigByCategory).length
+    ),
     leaderboardAvailable: Boolean(tournament?.leaderboardSnapshotByCategory && Object.keys(tournament.leaderboardSnapshotByCategory).length),
     createdAt: tournament.createdAt || null,
     updatedAt: tournament.updatedAt || null,
@@ -678,7 +686,7 @@ router.post("/lookup-by-code", async (req, res) => {
     const code = String(req.body?.code || "").trim().toUpperCase();
     if (!code) return res.status(400).json({ message: "code is required" });
 
-    const all = await listTournamentAggregates();
+    const all = await listTournamentMetas();
     const item = asArray(all).find((t) => String(t?.accessCode || "").trim().toUpperCase() === code);
     if (!item) return res.status(404).json({ message: "Tournament not found for this code" });
     if (item.registrationsOpen === false) return res.status(409).json({ message: "Registrations are closed" });
@@ -699,7 +707,7 @@ router.post("/validate-code", async (req, res) => {
     if (tournamentId) {
       tournament = await getTournament(tournamentId);
     } else if (code) {
-      const all = await listTournamentAggregates();
+      const all = await listTournamentMetas();
       tournament = asArray(all).find((t) => String(t?.accessCode || "").trim().toUpperCase() === code.toUpperCase()) || null;
     }
 
@@ -726,7 +734,7 @@ router.post("/validate-code", async (req, res) => {
 // -----------------------------------------------------------------------------
 router.get("/", async (req, res) => {
   try {
-    const all = await listTournamentAggregates();
+    const all = await listTournamentMetas();
     const items = asArray(all)
       .sort((a, b) => String(b?.createdAt || "").localeCompare(String(a?.createdAt || "")))
       .map((t) => buildPublicTournamentView(t));
@@ -740,7 +748,7 @@ router.get("/", async (req, res) => {
 
 router.get("/mine", requireAuth, async (req, res) => {
   try {
-    const all = await listTournamentAggregates();
+    const all = await listTournamentMetas();
     const profile = await getCurrentUserProfile(req);
     const linkedTournamentIds = await getPendingLinkedTournamentIds(req, profile);
     const items = asArray(all)

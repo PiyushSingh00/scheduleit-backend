@@ -533,6 +533,19 @@ async function listTournamentAggregates() {
   return out;
 }
 
+async function listTournamentMetas() {
+  if (!USE_SPLIT_TABLES) {
+    return scanAll(LEGACY_TABLE);
+  }
+
+  const metas = await scanAll(META_TABLE);
+  if (!metas.length) {
+    return scanAll(LEGACY_TABLE);
+  }
+
+  return metas.map((meta) => cloneJson(meta));
+}
+
 async function saveTournamentAggregate(tournament) {
   if (!tournament?.tournamentId) {
     throw new Error('tournamentId is required');
@@ -564,11 +577,39 @@ async function saveTournamentAggregate(tournament) {
 }
 
 async function updateTournamentAggregateFields(tournamentId, fields) {
+  if (!USE_SPLIT_TABLES) {
+    const current = await getTournamentAggregate(tournamentId);
+    if (!current) return null;
+    const next = {
+      ...cloneJson(current),
+      ...cloneJson(fields || {}),
+      updatedAt: nowIso(),
+    };
+    return saveTournamentAggregate(next);
+  }
+
+  const nextFields = cloneJson(fields || {});
+  const touchesFixtures = Object.prototype.hasOwnProperty.call(nextFields, 'fixtures');
+
+  if (!touchesFixtures) {
+    const currentMeta = await getTournamentMeta(tournamentId);
+    if (!currentMeta) return null;
+
+    const nextMeta = {
+      ...cloneJson(currentMeta),
+      ...nextFields,
+      updatedAt: nowIso(),
+    };
+
+    await saveTournamentMeta(nextMeta);
+    return nextMeta;
+  }
+
   const current = await getTournamentAggregate(tournamentId);
   if (!current) return null;
   const next = {
     ...cloneJson(current),
-    ...cloneJson(fields || {}),
+    ...nextFields,
     updatedAt: nowIso(),
   };
   return saveTournamentAggregate(next);
@@ -656,6 +697,7 @@ module.exports = {
   replaceTournamentMatches,
   getTournamentAggregate,
   listTournamentAggregates,
+  listTournamentMetas,
   saveTournamentAggregate,
   updateTournamentAggregateFields,
   updateTournamentMetaFields,
