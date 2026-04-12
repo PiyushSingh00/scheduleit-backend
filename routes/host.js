@@ -1408,15 +1408,35 @@ function summarizeTieMatch(match) {
     const computed = sub?.score?.computed || {};
     const homeLabel = String(match?.home || "");
     const awayLabel = String(match?.away || "");
-    const aValue = Number(computed?.aValue ?? sub?.score?.state?.A?.points ?? sub?.score?.state?.A?.score ?? sub?.score?.state?.A?.goals ?? sub?.score?.state?.A?.runs ?? 0);
-    const bValue = Number(computed?.bValue ?? sub?.score?.state?.B?.points ?? sub?.score?.state?.B?.score ?? sub?.score?.state?.B?.goals ?? sub?.score?.state?.B?.runs ?? 0);
+
+    const aValue = Number(
+      computed?.aValue ??
+      sub?.score?.state?.A?.points ??
+      sub?.score?.state?.A?.score ??
+      sub?.score?.state?.A?.goals ??
+      sub?.score?.state?.A?.runs ??
+      0
+    );
+
+    const bValue = Number(
+      computed?.bValue ??
+      sub?.score?.state?.B?.points ??
+      sub?.score?.state?.B?.score ??
+      sub?.score?.state?.B?.goals ??
+      sub?.score?.state?.B?.runs ??
+      0
+    );
 
     homeMatchPoints += Number.isFinite(aValue) ? aValue : 0;
     awayMatchPoints += Number.isFinite(bValue) ? bValue : 0;
 
     if (computed?.status === "completed") completedCount += 1;
-    if (computed?.winnerSide === "A" || computed?.winnerName === homeLabel) homeWins += 1;
-    else if (computed?.winnerSide === "B" || computed?.winnerName === awayLabel) awayWins += 1;
+
+    if (computed?.winnerSide === "A" || computed?.winnerName === homeLabel) {
+      homeWins += 1;
+    } else if (computed?.winnerSide === "B" || computed?.winnerName === awayLabel) {
+      awayWins += 1;
+    }
   });
 
   match.homeWins = homeWins;
@@ -1424,18 +1444,30 @@ function summarizeTieMatch(match) {
   match.matchPointsHome = homeMatchPoints;
   match.matchPointsAway = awayMatchPoints;
 
-  if (homeWins > awayWins) {
-    match.winner = match.home;
-    match.winnerSide = "A";
-    match.status = "completed";
-  } else if (awayWins > homeWins) {
-    match.winner = match.away;
-    match.winnerSide = "B";
-    match.status = "completed";
-  } else if (completedCount === submatches.length && submatches.length > 0) {
-    match.winner = null;
-    match.winnerSide = null;
-    match.status = "completed";
+  const allCompleted = completedCount === submatches.length && submatches.length > 0;
+
+  if (allCompleted) {
+    if (homeMatchPoints > awayMatchPoints) {
+      match.winner = match.home;
+      match.winnerSide = "A";
+      match.status = "completed";
+    } else if (awayMatchPoints > homeMatchPoints) {
+      match.winner = match.away;
+      match.winnerSide = "B";
+      match.status = "completed";
+    } else if (homeWins > awayWins) {
+      match.winner = match.home;
+      match.winnerSide = "A";
+      match.status = "completed";
+    } else if (awayWins > homeWins) {
+      match.winner = match.away;
+      match.winnerSide = "B";
+      match.status = "completed";
+    } else {
+      match.winner = null;
+      match.winnerSide = null;
+      match.status = "completed";
+    }
   } else {
     match.winner = null;
     match.winnerSide = null;
