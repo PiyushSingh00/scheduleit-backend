@@ -1,7 +1,6 @@
 const express = require("express");
 const { v4: uuid } = require("uuid");
 const AWS = require("aws-sdk");
-const zlib = require("zlib");
 const { requireAuth } = require("../middleware/auth");
 
 const {
@@ -39,7 +38,6 @@ const PENDING_PLAYER_LINKS_SORT_KEY =
   process.env.SCHEDULEIT_PENDING_PLAYER_LINKS_SORT_KEY || "linkKey";
 const TEAM_EVENT_CATEGORY_ID = "__team_event__";
 const REGION = process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || "eu-north-1";
-const TOURNAMENT_META_TABLE = process.env.TOURNAMENT_META_TABLE || "ScheduleItTournamentMeta";
 AWS.config.update({ region: REGION });
 
 function nowIso() {
@@ -48,27 +46,6 @@ function nowIso() {
 
 function cloneJson(value) {
   return value == null ? value : JSON.parse(JSON.stringify(value));
-}
-
-function compressJsonPayload(value) {
-  try {
-    const json = JSON.stringify(value == null ? null : value);
-    return zlib.gzipSync(Buffer.from(json, "utf8")).toString("base64");
-  } catch {
-    return "";
-  }
-}
-
-function decompressJsonPayload(value, fallback = null) {
-  const raw = String(value || "").trim();
-  if (!raw) return fallback;
-  try {
-    const buffer = Buffer.from(raw, "base64");
-    const json = zlib.gunzipSync(buffer).toString("utf8");
-    return JSON.parse(json);
-  } catch {
-    return fallback;
-  }
 }
 
 function normalizeText(value) {
@@ -364,17 +341,6 @@ async function getCurrentUserProfileForAccess(req) {
     console.warn("Could not load current user profile for access:", err?.message || err);
     return null;
   }
-}
-
-async function scanAllItems(tableName) {
-  const items = [];
-  let ExclusiveStartKey;
-  do {
-    const result = await dynamo.scan({ TableName: tableName, ExclusiveStartKey }).promise();
-    items.push(...asArray(result.Items));
-    ExclusiveStartKey = result.LastEvaluatedKey;
-  } while (ExclusiveStartKey);
-  return items;
 }
 
 async function isUmpireForTournament(req, tournament) {
@@ -1833,42 +1799,6 @@ function appendKnockoutRoundsIfNeeded(tournament, categoryId, fixturesOverride) 
   return { changed: true, fixtures };
 }
 
-function onlyProgressionChanged(currentFixtures, nextFixtures, categoryId) {
-  const current = normalizeFixtures(currentFixtures || { categories: {} });
-  const next = normalizeFixtures(nextFixtures || { categories: {} });
-  const currentCategories = current.categories || {};
-  const nextCategories = next.categories || {};
-
-  const categoryKeys = uniqStrings([
-    ...Object.keys(currentCategories),
-    ...Object.keys(nextCategories),
-  ]);
-
-  return categoryKeys.every((key) => {
-    const currentBucket = currentCategories[key] || null;
-    const nextBucket = nextCategories[key] || null;
-
-    if (String(key) !== String(categoryId)) {
-      return JSON.stringify(currentBucket) === JSON.stringify(nextBucket);
-    }
-
-    const currentBaseRounds = cloneJson(getBaseRoundsWithoutKnockout(currentBucket));
-    const nextBaseRounds = cloneJson(getBaseRoundsWithoutKnockout(nextBucket));
-    if (JSON.stringify(currentBaseRounds) !== JSON.stringify(nextBaseRounds)) return false;
-
-    const currentClone = cloneJson(currentBucket || {});
-    const nextClone = cloneJson(nextBucket || {});
-    currentClone.rounds = currentBaseRounds;
-    nextClone.rounds = nextBaseRounds;
-    currentClone.totalRounds = asArray(currentBaseRounds).length;
-    nextClone.totalRounds = asArray(nextBaseRounds).length;
-    delete currentClone.knockout;
-    delete nextClone.knockout;
-
-    return JSON.stringify(currentClone) === JSON.stringify(nextClone);
-  });
-}
-
 function defaultSchemaForSport(sportName = "") {
   const sport = String(sportName || "").toLowerCase();
 
@@ -2208,68 +2138,6 @@ function getLineupsForResponse(tournament, req, categoryId) {
   return { ties };
 }
 
-function buildFixtureUndoSnapshot(tournament, req, action = "", meta = {}) {
-  const payload = {
-    fixtures: normalizeFixtures(tournament?.fixtures || { categories: {} }),
-    leaderboardSnapshotByCategory: cloneJson(tournament?.leaderboardSnapshotByCategory || {}),
-  };
-
-  return {
-    payload: compressJsonPayload(payload),
-    savedAt: nowIso(),
-    savedBy: getAuthUsername(req),
-    action: String(action || "fixture_change").trim() || "fixture_change",
-    meta: cloneJson(meta || {}),
-  };
-}
-
-function fixturesMeaningfullyChanged(currentFixtures, nextFixtures) {
-  return JSON.stringify(normalizeFixtures(currentFixtures || { categories: {} })) !== JSON.stringify(normalizeFixtures(nextFixtures || { categories: {} }));
-}
-
-function leaderboardSnapshotsChanged(currentSnapshots, nextSnapshots) {
-  return JSON.stringify(cloneJson(currentSnapshots || {})) !== JSON.stringify(cloneJson(nextSnapshots || {}));
-}
-
-async function persistManualFixtureChange(tournament, req, nextFixtures, options = {}) {
-  const normalizedNextFixtures = normalizeFixtures(nextFixtures || { categories: {} });
-  const nextSnapshots = cloneJson(
-    options.leaderboardSnapshotByCategory != null
-      ? options.leaderboardSnapshotByCategory
-      : tournament?.leaderboardSnapshotByCategory || {}
-  );
-
-  const shouldCaptureUndo =
-    options.captureUndo !== false &&
-    (
-      fixturesMeaningfullyChanged(tournament?.fixtures, normalizedNextFixtures) ||
-      leaderboardSnapshotsChanged(tournament?.leaderboardSnapshotByCategory, nextSnapshots)
-    );
-
-  const fields = {
-    leaderboardSnapshotByCategory: nextSnapshots,
-    fixturesUpdatedAt: nowIso(),
-    updatedBy: getAuthUsername(req),
-    ...(cloneJson(options.extraFields || {})),
-  };
-
-  if (shouldCaptureUndo) {
-    fields.fixturesUndoSnapshot = buildFixtureUndoSnapshot(
-      tournament,
-      req,
-      options.action || "fixture_change",
-      {
-        categoryId: options.categoryId || null,
-      }
-    );
-  }
-
-  return updateTournamentFields(tournament.tournamentId, {
-    ...fields,
-    fixtures: normalizedNextFixtures,
-  });
-}
-
 // -----------------------------------------------------------------------------
 // TOURNAMENT CRUD
 // -----------------------------------------------------------------------------
@@ -2365,20 +2233,7 @@ router.post("/tournaments", requireAuth, async (req, res) => {
 
 router.get("/tournaments", requireAuth, async (req, res) => {
   try {
-    let items = [];
-
-    if (USE_SPLIT_TABLES) {
-      try {
-        items = await scanAllItems(TOURNAMENT_META_TABLE);
-      } catch (metaErr) {
-        console.warn("Host tournaments meta scan failed, falling back to aggregate list:", metaErr?.message || metaErr);
-      }
-    }
-
-    if (!items.length) {
-      items = await listTournamentAggregates();
-    }
-
+    const items = await listTournamentAggregates();
     const mine = asArray(items).filter((t) => isOwner(req, t));
     return res.json(mine);
   } catch (err) {
@@ -3679,8 +3534,10 @@ router.post("/tournaments/:tournamentId/fixtures", requireAuth, async (req, res)
     if (tournament.fixtures && Object.keys(tournament.fixtures.categories || {}).length) {
       return res.status(409).json({ message: "Fixtures already generated. Use manual update." });
     }
-    const updated = await persistManualFixtureChange(tournament, req, incoming, {
-      action: "generate_fixtures",
+    const updated = await updateTournamentFields(req.params.tournamentId, {
+      fixtures: incoming,
+      fixturesUpdatedAt: nowIso(),
+      updatedBy: getAuthUsername(req),
     });
     return res.json(updated.fixtures);
   } catch (err) {
@@ -3697,107 +3554,14 @@ router.post("/tournaments/:tournamentId/fixtures/update", requireAuth, async (re
     if (!incoming.categories || typeof incoming.categories !== "object") {
       return res.status(400).json({ message: "Fixtures must have categories object" });
     }
-    const updated = await persistManualFixtureChange(tournament, req, incoming, {
-      action: "update_fixtures",
-      captureUndo: false,
+    const updated = await updateTournamentFields(req.params.tournamentId, {
+      fixtures: incoming,
+      fixturesUpdatedAt: nowIso(),
+      updatedBy: getAuthUsername(req),
     });
     return res.json(updated.fixtures);
   } catch (err) {
     console.error("Host POST fixtures update error:", err);
-    return res.status(500).json({ message: "Server error" });
-  }
-});
-
-router.post("/tournaments/:tournamentId/fixtures/category-update", requireAuth, async (req, res) => {
-  try {
-    const tournament = await getTournament(req.params.tournamentId);
-    if (!assertOwner(req, tournament, res)) return;
-
-    const categoryId = String(req.body?.categoryId || "").trim();
-    if (!categoryId) {
-      return res.status(400).json({ message: "categoryId is required" });
-    }
-
-    const fixtures = normalizeFixtures(tournament.fixtures || { categories: {} });
-    const currentBucket = cloneJson(fixtures.categories?.[categoryId] || null);
-    if (!currentBucket) {
-      return res.status(404).json({ message: "Fixture category not found" });
-    }
-
-    let nextBucket = null;
-    const edits = asArray(req.body?.edits);
-    if (edits.length) {
-      const rounds = asArray(currentBucket.rounds).map((round) =>
-        asArray(round).map((match) => ensureMatchMeta(cloneJson(match)))
-      );
-
-      edits.forEach((edit) => {
-        const roundIndex = Number(edit?.roundIndex);
-        const matchIndex = Number(edit?.matchIndex);
-        if (!Number.isInteger(roundIndex) || roundIndex < 0 || !Number.isInteger(matchIndex) || matchIndex < 0) return;
-        const match = rounds?.[roundIndex]?.[matchIndex];
-        if (!match) return;
-
-        const home = String(edit?.home ?? match.home ?? "").trim();
-        const away = String(edit?.away ?? match.away ?? "").trim();
-        match.home = home;
-        match.away = away;
-        match.homePlayers = home ? [home] : [];
-        match.awayPlayers = away ? [away] : [];
-        match.date = String(edit?.date ?? match.date ?? "").trim();
-        match.time = String(edit?.time ?? match.time ?? "").trim();
-        match.court = String(edit?.court ?? match.court ?? "").trim();
-      });
-
-      nextBucket = {
-        ...currentBucket,
-        categoryId,
-        rounds,
-        matches: Array.isArray(rounds?.[0]) ? rounds[0] : asArray(currentBucket.matches),
-        totalRounds: asArray(rounds).length,
-      };
-
-      if (currentBucket.knockout && Array.isArray(currentBucket.knockout.rounds)) {
-        nextBucket.knockout = {
-          ...currentBucket.knockout,
-          rounds: rounds.slice(1),
-          totalRounds: Math.max(0, rounds.length - 1),
-        };
-      }
-    } else {
-      const bucketInput = req.body?.bucket;
-      if (!bucketInput || typeof bucketInput !== "object") {
-        return res.status(400).json({ message: "bucket or edits are required" });
-      }
-      nextBucket = cloneJson(bucketInput);
-      nextBucket.categoryId = categoryId;
-      nextBucket.rounds = asArray(nextBucket.rounds).map((round) => asArray(round).map((match) => ensureMatchMeta(match)));
-      if (Array.isArray(nextBucket.matches)) {
-        nextBucket.matches = nextBucket.matches.map((match) => ensureMatchMeta(match));
-      }
-      if (!Array.isArray(nextBucket.matches) && Array.isArray(nextBucket.rounds?.[0])) {
-        nextBucket.matches = nextBucket.rounds[0];
-      }
-      nextBucket.totalRounds = toFiniteNumber(nextBucket.totalRounds, null) || asArray(nextBucket.rounds).length;
-    }
-
-    fixtures.categories = fixtures.categories || {};
-    fixtures.categories[categoryId] = nextBucket;
-
-    const updated = await persistManualFixtureChange(tournament, req, fixtures, {
-      action: "update_fixture_category",
-      categoryId,
-      captureUndo: false,
-    });
-
-    return res.json({
-      ok: true,
-      categoryId,
-      bucket: updated.fixtures?.categories?.[categoryId] || nextBucket,
-      fixtures: updated.fixtures,
-    });
-  } catch (err) {
-    console.error("Host POST fixture category update error:", err);
     return res.status(500).json({ message: "Server error" });
   }
 });
@@ -3813,13 +3577,14 @@ router.post("/tournaments/:tournamentId/fixtures/generate-league", requireAuth, 
     const rows = computeLeaderboardRows(tournament, out.categoryId, out.fixtures);
     const snapshotKey = String(out.categoryId || categoryId);
 
-    const updated = await persistManualFixtureChange(tournament, req, out.fixtures, {
-      action: "generate_league_fixtures",
-      categoryId: snapshotKey,
+    const updated = await updateTournamentFields(req.params.tournamentId, {
+      fixtures: out.fixtures,
       leaderboardSnapshotByCategory: {
         ...(tournament.leaderboardSnapshotByCategory || {}),
         [snapshotKey]: rows,
       },
+      fixturesUpdatedAt: nowIso(),
+      updatedBy: getAuthUsername(req),
     });
 
     return res.json({ ok: true, fixtures: updated.fixtures, teams: out.teams, rows });
@@ -3856,83 +3621,21 @@ router.post("/tournaments/:tournamentId/progression/finalize", requireAuth, asyn
     if (!categoryId) return res.status(400).json({ message: "categoryId is required" });
 
     const resolvedCategoryId = resolveCategoryId(tournament, categoryId, { preferSyntheticForTeam: true });
-    const currentFixtures = normalizeFixtures(tournament.fixtures || { categories: {} });
-    const currentBucket = findCategoryBucket(currentFixtures, resolvedCategoryId);
-    if (!currentBucket) {
-      return res.status(404).json({ message: "Fixtures for this category were not found" });
-    }
-    if (getFirstKnockoutRoundIndex(currentBucket) >= 0 && hasStartedKnockoutRounds(currentBucket)) {
-      return res.status(409).json({ message: "Knockout has already started. Progression regeneration is blocked to protect existing scores." });
-    }
-
     const out = appendKnockoutRoundsIfNeeded(tournament, resolvedCategoryId, tournament.fixtures || null);
-    if (!onlyProgressionChanged(currentFixtures, out.fixtures, resolvedCategoryId)) {
-      return res.status(409).json({ message: "Safety check failed. Progression regeneration was blocked because it would change existing fixtures." });
-    }
     const rows = computeLeaderboardRows(tournament, resolvedCategoryId, out.fixtures);
 
-    const updated = await persistManualFixtureChange(tournament, req, out.fixtures, {
-      action: "regenerate_progression",
-      categoryId: resolvedCategoryId,
+    await updateTournamentFields(req.params.tournamentId, {
+      fixtures: out.fixtures,
       leaderboardSnapshotByCategory: {
         ...(tournament.leaderboardSnapshotByCategory || {}),
         [resolvedCategoryId]: rows,
       },
-    });
-
-    return res.json({
-      ok: true,
-      changed: out.changed,
-      leaderboard: rows,
-      fixtures: updated.fixtures,
-      message: out.changed ? "Progression regenerated" : "Knockout progression is already up to date",
-    });
-  } catch (err) {
-    console.error("Finalize progression error:", err);
-    return res.status(500).json({ message: "Server error" });
-  }
-});
-
-router.post("/tournaments/:tournamentId/fixtures/undo", requireAuth, async (req, res) => {
-  try {
-    const tournament = await getTournament(req.params.tournamentId);
-    if (!assertOwner(req, tournament, res)) return;
-
-    const snapshot = tournament?.fixturesUndoSnapshot;
-    const decodedPayload =
-      decompressJsonPayload(snapshot?.payload, null) ||
-      (snapshot?.fixtures && typeof snapshot.fixtures === "object"
-        ? {
-            fixtures: normalizeFixtures(snapshot.fixtures || { categories: {} }),
-            leaderboardSnapshotByCategory: cloneJson(snapshot.leaderboardSnapshotByCategory || {}),
-          }
-        : null);
-
-    if (!decodedPayload?.fixtures || typeof decodedPayload.fixtures !== "object") {
-      return res.status(409).json({ message: "No previous fixture version available to restore" });
-    }
-
-    const currentSnapshot = buildFixtureUndoSnapshot(tournament, req, "undo_fixture", {
-      restoredFrom: snapshot?.action || null,
-      restoredAt: nowIso(),
-    });
-
-    const updated = await updateTournamentFields(req.params.tournamentId, {
-      fixtures: normalizeFixtures(decodedPayload.fixtures || { categories: {} }),
-      leaderboardSnapshotByCategory: cloneJson(decodedPayload.leaderboardSnapshotByCategory || {}),
-      fixturesUndoSnapshot: currentSnapshot,
-      fixturesUpdatedAt: nowIso(),
       updatedBy: getAuthUsername(req),
     });
 
-    return res.json({
-      ok: true,
-      fixtures: updated.fixtures,
-      leaderboardSnapshotByCategory: updated.leaderboardSnapshotByCategory || {},
-      message: "Fixture restored to the previous saved version",
-    });
+    return res.json({ ok: true, changed: out.changed, leaderboard: rows, fixtures: out.fixtures });
   } catch (err) {
-    console.error("Undo fixtures error:", err);
+    console.error("Finalize progression error:", err);
     return res.status(500).json({ message: "Server error" });
   }
 });

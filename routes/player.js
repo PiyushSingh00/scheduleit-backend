@@ -6,7 +6,6 @@ const { requireAuth } = require("../middleware/auth");
 const {
   getTournamentAggregate,
   listTournamentAggregates,
-  listTournamentMetas,
   saveTournamentAggregate,
 } = require("../repositories/tournamentStore");
 
@@ -1627,7 +1626,7 @@ router.post("/tournaments/:tournamentId/leave", requireAuth, async (req, res) =>
 
 router.get("/tournaments", requireAuth, async (req, res) => {
   try {
-    const all = await listTournamentMetas();
+    const all = await listTournamentAggregates();
     const profile = await getCurrentUserProfile(req);
     const linkedTournamentIds = await getPendingLinkedTournamentIds(req, profile);
 
@@ -1648,7 +1647,7 @@ router.get("/tournaments", requireAuth, async (req, res) => {
 
 router.get("/team-requests", requireAuth, async (req, res) => {
   try {
-    const all = await listTournamentMetas();
+    const all = await listTournamentAggregates();
     const profile = await getCurrentUserProfile(req);
     const requests = getMyVisibleTeamRequests(asArray(all), req, profile);
     return res.json(requests);
