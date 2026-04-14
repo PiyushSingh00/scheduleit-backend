@@ -316,30 +316,16 @@ app.post("/api/login", async (req, res) => {
       return res.status(401).json({ message: "Invalid credentials" });
     }
 
-    const details = await getUserDetails(normalizedUsername);
-    const token = jwt.sign(
-      {
-        username: normalizedUsername
-      },
-      JWT_SECRET,
-      { expiresIn: "7d" }
-    );
+	const token = jwt.sign(
+  	{
+    	username: normalizedUsername
+  	},
+  	JWT_SECRET,
+  	{ expiresIn: "7d" }
+	);
 
-    const user = details
-      ? {
-          ...details,
-          phone: normalizePhone(
-            details?.phone ||
-            details?.phoneNumber ||
-            details?.mobile ||
-            ""
-          ),
-        }
-      : {
-          username: normalizedUsername,
-        };
 
-    res.json({ token, user });
+    res.json({ token });
 
   } catch (err) {
     console.error("Login error:", err);
@@ -405,4 +391,5 @@ app.post("/api/user/mode", authMiddleware, async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 });
+
 
