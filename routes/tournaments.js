@@ -364,6 +364,96 @@ function computeHeadToHeadSummary(results, a, b) {
   return winsA > winsB ? `${a} lead` : `${b} lead`;
 }
 
+function getGroupDefinitionsFromBucket(bucket) {
+  return asArray(bucket?.groups).map((group, index) => ({
+    groupIndex: Number(group?.groupIndex ?? index),
+    groupName: String(group?.groupName || `Group ${String.fromCharCode(65 + index)}`).trim(),
+    teamNames: asArray(group?.teamNames).map((name) => String(name || "").trim()).filter(Boolean),
+    roundIndex: Number(group?.roundIndex ?? index),
+    qualifierCount: Math.max(1, Number(group?.qualifierCount || 2) || 2),
+  }));
+}
+
+function computeSingleGroupLeaderboardRows(tournament, bucket, groupDef) {
+  const useMatchPointsRanking = isPickleballTeamLeague(tournament);
+  const pointsRule = tournament?.leaguePoints || {};
+  const round = asArray(bucket?.rounds?.[groupDef.roundIndex]);
+  const map = new Map();
+  const pairResults = {};
+
+  round.forEach((match) => {
+    if (!match) return;
+    const stage = normalizeText(match?.stage || "league");
+    if (stage === "knockout") return;
+
+    const home = ensureLeaderboardRow(map, match.home);
+    const away = ensureLeaderboardRow(map, match.away);
+    if (!home || !away) return;
+
+    const { homePoints, awayPoints } = getMatchScoreNumbers(match);
+    home.matchPoints += homePoints;
+    away.matchPoints += awayPoints;
+
+    const winner = String(match?.winner || "").trim();
+    const draw = !winner && normalizeText(match?.status) === "completed";
+
+    if (winner && winner === home.teamName) {
+      home.tiesWon += 1;
+      away.tiesLost += 1;
+      home.leaguePoints += toFiniteNumber(pointsRule.win, useMatchPointsRanking ? 0 : 3) || 0;
+      away.leaguePoints += toFiniteNumber(pointsRule.loss, useMatchPointsRanking ? 0 : 0) || 0;
+    } else if (winner && winner === away.teamName) {
+      away.tiesWon += 1;
+      home.tiesLost += 1;
+      away.leaguePoints += toFiniteNumber(pointsRule.win, useMatchPointsRanking ? 0 : 3) || 0;
+      home.leaguePoints += toFiniteNumber(pointsRule.loss, useMatchPointsRanking ? 0 : 0) || 0;
+    } else if (draw) {
+      home.tiesDrawn += 1;
+      away.tiesDrawn += 1;
+      const drawPts = toFiniteNumber(pointsRule.draw, useMatchPointsRanking ? 0 : 1) || 0;
+      home.leaguePoints += drawPts;
+      away.leaguePoints += drawPts;
+    }
+
+    const pairKey = getPairKey(home.teamName, away.teamName);
+    pairResults[pairKey] = pairResults[pairKey] || [];
+    pairResults[pairKey].push({ winner, home: home.teamName, away: away.teamName });
+  });
+
+  const rows = Array.from(map.values()).map((row) => ({
+    ...row,
+    groupName: groupDef.groupName,
+    headToHead: "-",
+  }));
+
+  rows.sort((a, b) => {
+    if (!useMatchPointsRanking && b.leaguePoints !== a.leaguePoints) return b.leaguePoints - a.leaguePoints;
+    if (b.matchPoints !== a.matchPoints) return b.matchPoints - a.matchPoints;
+    if (b.tiesWon !== a.tiesWon) return b.tiesWon - a.tiesWon;
+    return a.teamName.localeCompare(b.teamName);
+  });
+
+  rows.forEach((row, idx) => {
+    row.rank = idx + 1;
+    row.qualified = idx < Math.min(groupDef.qualifierCount, rows.length);
+  });
+
+  rows.forEach((row) => {
+    const peers = rows.filter(
+      (x) =>
+        x !== row &&
+        x.matchPoints === row.matchPoints &&
+        x.tiesWon === row.tiesWon &&
+        x.leaguePoints === row.leaguePoints
+    );
+    if (peers.length === 1) {
+      row.headToHead = computeHeadToHeadSummary(pairResults, row.teamName, peers[0].teamName);
+    }
+  });
+
+  return rows;
+}
+
 function computeLeaderboardRows(tournament, categoryId, fixturesOverride) {
   const snapshotByCategory = tournament?.leaderboardSnapshotByCategory || {};
   const resolvedCategoryId = resolveCategoryId(tournament, categoryId, { preferSyntheticForTeam: true });
@@ -375,6 +465,18 @@ function computeLeaderboardRows(tournament, categoryId, fixturesOverride) {
   const fixtures = normalizeFixtures(fixturesOverride || tournament?.fixtures || { categories: {} });
   const bucket = findCategoryBucket(fixtures, resolvedCategoryId);
   if (!bucket) return [];
+
+  const format = normalizeText(tournament?.stageFormat);
+
+  // GROUP + KNOCKOUT => return flattened grouped rows
+  if (format === "group_knockout" && isTeamTournament(tournament)) {
+    const groupDefs = getGroupDefinitionsFromBucket(bucket);
+    if (groupDefs.length) {
+      return groupDefs.flatMap((groupDef) =>
+        computeSingleGroupLeaderboardRows(tournament, bucket, groupDef)
+      );
+    }
+  }
 
   const useMatchPointsRanking = isPickleballTeamLeague(tournament);
   const pointsRule = tournament?.leaguePoints || {};
@@ -813,16 +915,42 @@ router.get("/:tournamentId/leaderboard", async (req, res) => {
     const tournament = await getTournament(req.params.tournamentId);
     if (!tournament) return res.status(404).json({ message: "Tournament not found" });
 
-    const categoryId = String(req.query.categoryId || resolveCategoryId(tournament, null, { preferSyntheticForTeam: true }) || "").trim();
+    const categoryId = String(
+      req.query.categoryId || resolveCategoryId(tournament, null, { preferSyntheticForTeam: true }) || ""
+    ).trim();
     if (!categoryId) return res.status(400).json({ message: "categoryId query param is required" });
 
     const resolvedCategoryId = resolveCategoryId(tournament, categoryId, { preferSyntheticForTeam: true });
+    const fixtures = normalizeFixtures(tournament.fixtures || null);
+    const bucket = findCategoryBucket(fixtures, resolvedCategoryId);
+    const format = normalizeText(tournament?.stageFormat);
+
+    if (format === "group_knockout" && isTeamTournament(tournament) && bucket) {
+      const groupDefs = getGroupDefinitionsFromBucket(bucket);
+      const groups = groupDefs.map((groupDef) => ({
+        groupName: groupDef.groupName,
+        roundIndex: groupDef.roundIndex,
+        qualifierCount: groupDef.qualifierCount,
+        rows: computeSingleGroupLeaderboardRows(tournament, bucket, groupDef),
+      }));
+
+      return res.json({
+        ok: true,
+        categoryId: resolvedCategoryId,
+        mode: isPickleballTeamLeague(tournament) ? "pickleball_team_league" : "default",
+        grouped: true,
+        groups,
+        rows: groups.flatMap((group) => group.rows),
+      });
+    }
+
     const rows = computeLeaderboardRows(tournament, resolvedCategoryId, tournament.fixtures || null);
 
     return res.json({
       ok: true,
       categoryId: resolvedCategoryId,
       mode: isPickleballTeamLeague(tournament) ? "pickleball_team_league" : "default",
+      grouped: false,
       rows,
     });
   } catch (err) {
