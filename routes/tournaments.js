@@ -466,10 +466,10 @@ function computeLeaderboardRows(tournament, categoryId, fixturesOverride) {
   const bucket = findCategoryBucket(fixtures, resolvedCategoryId);
   if (!bucket) return [];
 
-  const format = normalizeText(tournament?.stageFormat);
+  const format = normalizeText(bucket?.stageFormat || tournament?.stageFormat);
 
   // GROUP + KNOCKOUT => return flattened grouped rows
-  if (format === "group_knockout" && isTeamTournament(tournament)) {
+  if (format === "group_knockout") {
     const groupDefs = getGroupDefinitionsFromBucket(bucket);
     if (groupDefs.length) {
       return groupDefs.flatMap((groupDef) =>
@@ -923,9 +923,9 @@ router.get("/:tournamentId/leaderboard", async (req, res) => {
     const resolvedCategoryId = resolveCategoryId(tournament, categoryId, { preferSyntheticForTeam: true });
     const fixtures = normalizeFixtures(tournament.fixtures || null);
     const bucket = findCategoryBucket(fixtures, resolvedCategoryId);
-    const format = normalizeText(tournament?.stageFormat);
+    const format = normalizeText(bucket?.stageFormat || tournament?.stageFormat);
 
-    if (format === "group_knockout" && isTeamTournament(tournament) && bucket) {
+    if (format === "group_knockout" && bucket) {
       const groupDefs = getGroupDefinitionsFromBucket(bucket);
       const groups = groupDefs.map((groupDef) => ({
         groupName: groupDef.groupName,

@@ -1209,6 +1209,89 @@ function scheduleLeaguePairs(pairs, courtNames, baseDate) {
   });
 }
 
+function buildFullRoundRobinPairs(teamNames) {
+  const names = [...teamNames].filter(Boolean);
+  const pairs = [];
+
+  for (let i = 0; i < names.length; i += 1) {
+    for (let j = i + 1; j < names.length; j += 1) {
+      pairs.push({ home: names[i], away: names[j] });
+    }
+  }
+
+  return shuffle(pairs);
+}
+
+function chunkTeamsNearlyEqual(teamNames, groupCount) {
+  const teams = shuffle([...teamNames].filter(Boolean));
+  const groups = Array.from({ length: groupCount }, (_, idx) => ({
+    groupIndex: idx,
+    groupName: `Group ${String.fromCharCode(65 + idx)}`,
+    teams: [],
+  }));
+
+  teams.forEach((team, idx) => {
+    groups[idx % groupCount].teams.push(team);
+  });
+
+  return groups;
+}
+
+function buildScheduledMatchesWithRoster(pairs, teamMap, courtNames, baseDate) {
+  const scheduled = scheduleLeaguePairs(pairs, courtNames, baseDate);
+  return scheduled.map((match) => {
+    const home = String(match?.home || "").trim();
+    const away = String(match?.away || "").trim();
+    return ensureMatchMeta({
+      ...match,
+      type: "match",
+      homePlayers: Array.isArray(teamMap?.[home]) ? [...teamMap[home]] : splitTeamName(home),
+      awayPlayers: Array.isArray(teamMap?.[away]) ? [...teamMap[away]] : splitTeamName(away),
+    });
+  });
+}
+
+function buildCategoryGroupRoundRobinSchedule(groups, teamMap, courtNames, baseDate) {
+  const allRounds = [];
+  const groupMeta = [];
+
+  let runningBase = new Date(baseDate.getTime());
+
+  groups.forEach((group) => {
+    const pairs = buildFullRoundRobinPairs(group.teams);
+    const scheduledMatches = buildScheduledMatchesWithRoster(
+      pairs,
+      teamMap,
+      shuffle(courtNames),
+      runningBase
+    );
+
+    allRounds.push(scheduledMatches);
+
+    groupMeta.push({
+      groupIndex: group.groupIndex,
+      groupName: group.groupName,
+      teamNames: [...group.teams],
+      roundIndex: allRounds.length - 1,
+      qualifierCount: 2,
+    });
+
+    if (scheduledMatches.length) {
+      const latestStart = scheduledMatches.reduce((maxTs, match) => {
+        const dateValue = match?.date || match?.matchDate || "";
+        const timeValue = match?.time || match?.matchTime || "09:00";
+        const dt = new Date(`${dateValue}T${timeValue}`);
+        const ts = dt.getTime();
+        return Number.isFinite(ts) ? Math.max(maxTs, ts) : maxTs;
+      }, runningBase.getTime());
+
+      runningBase = new Date(latestStart + 24 * 60 * 60 * 1000);
+    }
+  });
+
+  return { rounds: allRounds, groupMeta };
+}
+
 function buildRoundRobinRounds(entrants) {
   const list = [...entrants];
   if (list.length < 2) return [];
@@ -1257,6 +1340,9 @@ function buildLeagueFixturesForCategory(tournament, categoryId, existingFixtures
   const fixtures = normalizeFixtures(existingFixtures || tournament?.fixtures || { categories: {} });
   const resolvedCategoryId = resolveCategoryId(tournament, categoryId, { preferSyntheticForTeam: true });
   const isTeam = isTeamTournament(tournament);
+  const format = normalizeText(tournament?.stageFormat);
+  const courtNames = getAvailableCourtNames(tournament);
+  const startDate = parseTournamentStartDate(tournament);
 
   if (!resolvedCategoryId) {
     return { fixtures, teams: [], categoryId: null };
@@ -1264,40 +1350,182 @@ function buildLeagueFixturesForCategory(tournament, categoryId, existingFixtures
 
   if (isTeam) {
     const teams = getConfirmedTeams(tournament);
-    const requestedRounds = getLeagueRoundsRequested(tournament) || Math.max(1, teams.length - 1);
-    const { pairs, matchesPerTeam } = buildBalancedLeaguePairs(teams.map((t) => t.teamName), requestedRounds);
-    const scheduled = scheduleLeaguePairs(pairs, getAvailableCourtNames(tournament), parseTournamentStartDate(tournament));
+    const teamNames = teams.map((t) => t.teamName).filter(Boolean);
+
+    if (format === "round_robin") {
+      const pairs = buildFullRoundRobinPairs(teamNames);
+      const scheduled = scheduleLeaguePairs(pairs, courtNames, startDate);
+
+      fixtures.tournamentType = "team";
+      fixtures.teamCategories = normalizeCategories(tournament?.categories).map(normalizeCategoryItem);
+      fixtures.categories[resolvedCategoryId] = {
+        categoryId: resolvedCategoryId,
+        label: "League schedule",
+        displayMode: "team_schedule",
+        stageFormat: "round_robin",
+        rounds: [scheduled],
+        matches: scheduled,
+        totalRounds: 1,
+        teams: teams.map((t) => ({ teamName: t.teamName, captainName: t.captainName })),
+      };
+
+      return { fixtures, teams, categoryId: resolvedCategoryId };
+    }
+
+    if (format === "group_knockout") {
+      const requestedGroupCount = Math.max(2, toFiniteNumber(tournament?.groupCount, 2) || 2);
+      const groups = chunkTeamsNearlyEqual(teamNames, requestedGroupCount)
+        .filter((group) => group.teams.length >= 2);
+
+      const { rounds, groupMeta } = buildCategoryGroupRoundRobinSchedule(
+        groups,
+        Object.fromEntries(teamNames.map((name) => [name, [name]])),
+        courtNames,
+        startDate
+      );
+
+      fixtures.tournamentType = "team";
+      fixtures.teamCategories = normalizeCategories(tournament?.categories).map(normalizeCategoryItem);
+      fixtures.categories[resolvedCategoryId] = {
+        categoryId: resolvedCategoryId,
+        label: "Group fixtures",
+        displayMode: "team_schedule",
+        stageFormat: "group_knockout",
+        rounds,
+        matches: rounds[0] || [],
+        totalRounds: rounds.length,
+        groups: groupMeta,
+        knockout: null,
+        teams: teams.map((t) => ({ teamName: t.teamName, captainName: t.captainName })),
+      };
+
+      return { fixtures, teams, categoryId: resolvedCategoryId };
+    }
+
+    if (format === "round_robin_knockout" || isPickleballTeamLeague(tournament)) {
+      const requestedRounds = getLeagueRoundsRequested(tournament) || Math.max(1, teamNames.length - 1);
+      const { pairs, matchesPerTeam } = buildBalancedLeaguePairs(teamNames, requestedRounds);
+      const scheduled = scheduleLeaguePairs(pairs, courtNames, startDate);
+
+      fixtures.tournamentType = "team";
+      fixtures.teamCategories = normalizeCategories(tournament?.categories).map(normalizeCategoryItem);
+      fixtures.categories[resolvedCategoryId] = {
+        categoryId: resolvedCategoryId,
+        label: `League schedule • ${matchesPerTeam} matches per team`,
+        displayMode: "team_schedule",
+        stageFormat: "round_robin_knockout",
+        rounds: [scheduled],
+        matches: scheduled,
+        totalRounds: 1,
+        teams: teams.map((t) => ({ teamName: t.teamName, captainName: t.captainName })),
+      };
+
+      return { fixtures, teams, categoryId: resolvedCategoryId };
+    }
+
+    const entrants = teamNames;
+    const bracket = createBracket(
+      entrants,
+      Object.fromEntries(entrants.map((name) => [name, [name]])),
+      { stage: "knockout", type: "team_tie", shuffle: true }
+    );
 
     fixtures.tournamentType = "team";
     fixtures.teamCategories = normalizeCategories(tournament?.categories).map(normalizeCategoryItem);
     fixtures.categories[resolvedCategoryId] = {
       categoryId: resolvedCategoryId,
-      label: `League schedule • ${matchesPerTeam} matches per team`,
-      displayMode: "team_schedule",
-      rounds: [scheduled],
-      matches: scheduled,
-      totalRounds: 1,
+      label: "Team fixtures",
+      displayMode: "team_bracket",
+      ...(bracket || { rounds: [], totalRounds: 0 }),
       teams: teams.map((t) => ({ teamName: t.teamName, captainName: t.captainName })),
     };
 
     return { fixtures, teams, categoryId: resolvedCategoryId };
   }
 
+  // SINGLE / INDIVIDUAL EVENT
   const cat = getCategoryMeta(tournament, resolvedCategoryId);
   const entrants = getAcceptedPlayersForCategory(tournament, resolvedCategoryId);
   const teamSize = toFiniteNumber(cat?.teamSize, 1) || 1;
   const built = buildEntrants(entrants, teamSize);
-  const rounds = buildRoundRobinRounds(built.entrants);
+  const entrantNames = built.entrants || [];
+  const teamMap = built.teamMap || {};
+
+  if (format === "round_robin") {
+    const pairs = buildFullRoundRobinPairs(entrantNames);
+    const scheduled = buildScheduledMatchesWithRoster(pairs, teamMap, courtNames, startDate);
+
+    fixtures.categories[resolvedCategoryId] = {
+      categoryId: resolvedCategoryId,
+      label: cat?.eventName || cat?.categoryId || "Category",
+      displayMode: "league_rounds",
+      stageFormat: "round_robin",
+      rounds: [scheduled],
+      matches: scheduled,
+      totalRounds: 1,
+    };
+
+    return { fixtures, teams: entrantNames, categoryId: resolvedCategoryId };
+  }
+
+  if (format === "group_knockout") {
+    const requestedGroupCount = Math.max(2, toFiniteNumber(tournament?.groupCount, 2) || 2);
+    const groups = chunkTeamsNearlyEqual(entrantNames, requestedGroupCount)
+      .filter((group) => group.teams.length >= 2);
+
+    const { rounds, groupMeta } = buildCategoryGroupRoundRobinSchedule(
+      groups,
+      teamMap,
+      courtNames,
+      startDate
+    );
+
+    fixtures.categories[resolvedCategoryId] = {
+      categoryId: resolvedCategoryId,
+      label: cat?.eventName || cat?.categoryId || "Category",
+      displayMode: "league_rounds",
+      stageFormat: "group_knockout",
+      rounds,
+      matches: rounds[0] || [],
+      totalRounds: rounds.length,
+      groups: groupMeta,
+      knockout: null,
+    };
+
+    return { fixtures, teams: entrantNames, categoryId: resolvedCategoryId };
+  }
+
+  if (format === "round_robin_knockout") {
+    const requestedRounds = getLeagueRoundsRequested(tournament) || Math.max(1, entrantNames.length - 1);
+    const { pairs, matchesPerTeam } = buildBalancedLeaguePairs(entrantNames, requestedRounds);
+    const scheduled = buildScheduledMatchesWithRoster(pairs, teamMap, courtNames, startDate);
+
+    fixtures.categories[resolvedCategoryId] = {
+      categoryId: resolvedCategoryId,
+      label: `${cat?.eventName || cat?.categoryId || "Category"} • ${matchesPerTeam} matches per entrant`,
+      displayMode: "league_rounds",
+      stageFormat: "round_robin_knockout",
+      rounds: [scheduled],
+      matches: scheduled,
+      totalRounds: 1,
+    };
+
+    return { fixtures, teams: entrantNames, categoryId: resolvedCategoryId };
+  }
+
+  const bracket = createBracket(entrantNames, teamMap, {
+    stage: "knockout",
+    type: "match",
+    shuffle: true,
+  });
 
   fixtures.categories[resolvedCategoryId] = {
     categoryId: resolvedCategoryId,
     label: cat?.eventName || cat?.categoryId || "Category",
-    rounds,
-    totalRounds: rounds.length,
-    displayMode: "league_rounds",
+    ...(bracket || { rounds: [], totalRounds: 0 }),
   };
 
-  return { fixtures, teams: built.entrants, categoryId: resolvedCategoryId };
+  return { fixtures, teams: entrantNames, categoryId: resolvedCategoryId };
 }
 
 function findCategoryBucket(fixtures, categoryId) {
@@ -1800,10 +2028,10 @@ function computeLeaderboardRows(tournament, categoryId, fixturesOverride) {
   const bucket = findCategoryBucket(fixtures, resolvedCategoryId);
   if (!bucket) return [];
 
-  const format = normalizeText(tournament?.stageFormat);
+  const format = normalizeText(bucket?.stageFormat || tournament?.stageFormat);
 
   // GROUP + KNOCKOUT => separate group tables, flattened with groupName
-  if (format === "group_knockout" && isTeamTournament(tournament)) {
+  if (format === "group_knockout") {
     const groupDefs = getGroupDefinitionsFromBucket(bucket);
     if (groupDefs.length) {
       return groupDefs.flatMap((groupDef) =>
@@ -1812,7 +2040,6 @@ function computeLeaderboardRows(tournament, categoryId, fixturesOverride) {
     }
   }
 
-  // default/common single-table logic
   const useMatchPointsRanking = isPickleballTeamLeague(tournament);
   const pointsRule = tournament?.leaguePoints || {};
   const map = new Map();
@@ -1923,7 +2150,7 @@ function appendKnockoutRoundsIfNeeded(tournament, categoryId, fixturesOverride) 
   const bucket = findCategoryBucket(fixtures, resolvedCategoryId);
   if (!bucket) return { changed: false, fixtures };
 
-  const format = normalizeText(tournament?.stageFormat);
+  const format = normalizeText(bucket?.stageFormat || tournament?.stageFormat);
   const needsKnockout = ["group_knockout", "round_robin_knockout"].includes(format) || isPickleballTeamLeague(tournament);
   if (!needsKnockout) return { changed: false, fixtures };
 
@@ -1932,7 +2159,7 @@ function appendKnockoutRoundsIfNeeded(tournament, categoryId, fixturesOverride) 
 
   let entrants = [];
 
-  if (format === "group_knockout" && isTeamTournament(tournament)) {
+  if (format === "group_knockout") {
     const groupDefs = getGroupDefinitionsFromBucket(bucket);
     if (!groupDefs.length) return { changed: false, fixtures };
 
@@ -1972,6 +2199,8 @@ function appendKnockoutRoundsIfNeeded(tournament, categoryId, fixturesOverride) 
         match.lineupApproval = { home: "pending", away: "pending" };
         match.lineupLocked = false;
         match.submatches = asArray(match.submatches);
+      } else {
+        match.type = "match";
       }
     });
   });
@@ -3785,12 +4014,35 @@ router.get("/tournaments/:tournamentId/leaderboard", requireAuth, async (req, re
   try {
     const tournament = await getTournament(req.params.tournamentId);
     if (!assertOwner(req, tournament, res)) return;
+
     const categoryId = String(req.query.categoryId || "").trim();
     if (!categoryId) return res.status(400).json({ message: "categoryId query param is required" });
 
     const resolvedCategoryId = resolveCategoryId(tournament, categoryId, { preferSyntheticForTeam: true });
+    const fixtures = normalizeFixtures(tournament.fixtures || null);
+    const bucket = findCategoryBucket(fixtures, resolvedCategoryId);
+    const format = normalizeText(bucket?.stageFormat || tournament?.stageFormat);
+
+    if (format === "group_knockout" && bucket) {
+      const groupDefs = getGroupDefinitionsFromBucket(bucket);
+      const groups = groupDefs.map((groupDef) => ({
+        groupName: groupDef.groupName,
+        roundIndex: groupDef.roundIndex,
+        qualifierCount: groupDef.qualifierCount,
+        rows: computeSingleGroupLeaderboardRows(tournament, bucket, groupDef),
+      }));
+
+      return res.json({
+        ok: true,
+        categoryId: resolvedCategoryId,
+        grouped: true,
+        groups,
+        rows: groups.flatMap((group) => group.rows),
+      });
+    }
+
     const rows = computeLeaderboardRows(tournament, resolvedCategoryId, tournament.fixtures || null);
-    return res.json({ ok: true, rows, categoryId: resolvedCategoryId });
+    return res.json({ ok: true, rows, categoryId: resolvedCategoryId, grouped: false });
   } catch (err) {
     console.error("Host GET leaderboard error:", err);
     return res.status(500).json({ message: "Server error" });
