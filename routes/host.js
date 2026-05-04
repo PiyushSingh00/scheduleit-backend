@@ -1618,6 +1618,7 @@ function scoreIndividualMatch(match, schema, scorePayload) {
     football: payload?.football || null,
     basketball: payload?.basketball || null,
     badminton: payload?.badminton || null,
+    volleyball: payload?.volleyball || null,
     pickleball: payload?.pickleball || null,
     computed,
     updatedAt: nowIso(),

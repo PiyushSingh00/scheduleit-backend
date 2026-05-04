@@ -876,14 +876,29 @@ function getTeamTieCategoryPoints(category) {
   }
 
   if (sportKey === "badminton") {
-    return asArray(data?.games).reduce(
-      (acc, game) => {
-        acc.home += Number(game?.a ?? game?.home ?? 0);
-        acc.away += Number(game?.b ?? game?.away ?? 0);
-        return acc;
-      },
-      { home: 0, away: 0 }
-    );
+    // New rally-engine structure: games have homePoints/awayPoints; report game wins
+    const games = asArray(data?.games);
+    const aWins = games.filter((g) => g?.winnerSide === "A").length;
+    const bWins = games.filter((g) => g?.winnerSide === "B").length;
+    // Fall back to old stepper structure (game.a / game.b) for legacy data
+    if (aWins === 0 && bWins === 0) {
+      return games.reduce(
+        (acc, game) => {
+          acc.home += Number(game?.homePoints ?? game?.a ?? game?.home ?? 0);
+          acc.away += Number(game?.awayPoints ?? game?.b ?? game?.away ?? 0);
+          return acc;
+        },
+        { home: 0, away: 0 }
+      );
+    }
+    return { home: aWins, away: bWins };
+  }
+
+  if (sportKey === "volleyball") {
+    const sets = asArray(data?.sets);
+    const aWins = sets.filter((s) => s?.winnerSide === "A").length;
+    const bWins = sets.filter((s) => s?.winnerSide === "B").length;
+    return { home: aWins, away: bWins };
   }
 
   if (sportKey === "tennis") {
