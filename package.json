@@ -1,10 +1,12 @@
 {
-  "name": "ubuntu",
+  "name": "scheduleit-backend",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "ScheduleIt Express API",
+  "main": "app.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node app.js",
+    "check": "node tools/check-js.js",
+    "test": "npm run check"
   },
   "keywords": [],
   "author": "",
