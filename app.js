@@ -2,12 +2,16 @@ const express = require("express");
 const AWS = require("aws-sdk");
 const bcrypt = require("bcryptjs");
 const cors = require("cors");
+const crypto = require("crypto");
 const app = express();
 const JWT_SECRET = process.env.JWT_SECRET || "scheduleit_secret_key";
 const PORT = process.env.PORT || 4000; // backend will listen here
 const REGION = "eu-north-1"; // change if your DynamoDB region is different
 const USERS_TABLE = "ScheduleItUsers";
 const USER_DETAILS_TABLE="scheduleit-user-details";
+const GOOGLE_OAUTH_SCOPE = "openid email profile";
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || "";
 const SECURITY_QUESTIONS = {
   first_school: "What was the name of your first school?",
   childhood_nickname: "What was your childhood nickname?",
@@ -19,6 +23,8 @@ const SECURITY_QUESTIONS = {
 AWS.config.update({ region: REGION });
 const ddb = new AWS.DynamoDB.DocumentClient();
 const jwt = require("jsonwebtoken");
+
+app.set("trust proxy", true);
 
 function normalizePhone(value) {
   const digits = String(value || "").replace(/\D/g, "");
@@ -45,6 +51,178 @@ async function getUserDetails(username) {
     Key: { username },
   }).promise();
   return result.Item || null;
+}
+
+function createAuthToken(username) {
+  return jwt.sign({ username }, JWT_SECRET, { expiresIn: "7d" });
+}
+
+function toBase64Url(value) {
+  return Buffer.from(value)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
+
+function fromBase64Url(value) {
+  const padded = `${value}${"=".repeat((4 - (value.length % 4)) % 4)}`;
+  return Buffer.from(padded.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
+}
+
+function signState(payload) {
+  const encoded = toBase64Url(JSON.stringify(payload));
+  const sig = crypto.createHmac("sha256", JWT_SECRET).update(encoded).digest("base64url");
+  return `${encoded}.${sig}`;
+}
+
+function verifyState(state) {
+  try {
+    const [encoded, sig] = String(state || "").split(".");
+    if (!encoded || !sig) return null;
+
+    const expected = crypto.createHmac("sha256", JWT_SECRET).update(encoded).digest("base64url");
+    if (Buffer.byteLength(sig) !== Buffer.byteLength(expected)) return null;
+    if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;
+
+    const payload = JSON.parse(fromBase64Url(encoded));
+    if (!payload?.createdAt || Date.now() - Number(payload.createdAt) > 10 * 60 * 1000) return null;
+    return payload;
+  } catch (err) {
+    return null;
+  }
+}
+
+function getGoogleRedirectUri(req) {
+  if (process.env.GOOGLE_REDIRECT_URI) return process.env.GOOGLE_REDIRECT_URI;
+  const baseUrl = process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get("host")}`;
+  return `${baseUrl.replace(/\/+$/, "")}/api/auth/google/callback`;
+}
+
+function getSafeNextPath(value) {
+  const next = String(value || "").trim().toLowerCase();
+  if (next === "host" || next === "host.html") return "host.html";
+  if (next === "join" || next === "join.html") return "join.html";
+  return "";
+}
+
+function redirectGoogleResult(res, params) {
+  const fragment = new URLSearchParams(params).toString();
+  return res.redirect(`/index.html#${fragment}`);
+}
+
+function normalizeGoogleUsername(email) {
+  const localPart = String(email || "").split("@")[0] || "googleuser";
+  return localPart
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "")
+    .replace(/^[._-]+|[._-]+$/g, "")
+    .slice(0, 32) || "googleuser";
+}
+
+async function usernameExists(username) {
+  const result = await ddb.get({
+    TableName: USERS_TABLE,
+    Key: { username },
+  }).promise();
+  return Boolean(result.Item);
+}
+
+async function createUniqueGoogleUsername(email) {
+  const base = normalizeGoogleUsername(email);
+  for (let i = 0; i < 100; i += 1) {
+    const candidate = i === 0 ? base : `${base}${i + 1}`;
+    if (!(await usernameExists(candidate))) return candidate;
+  }
+
+  return `google-${crypto.randomUUID().slice(0, 8)}`;
+}
+
+async function findUserDetailsByGoogleProfile(profile) {
+  const email = String(profile.email || "").trim().toLowerCase();
+  const googleSub = String(profile.sub || "").trim();
+
+  const result = await ddb.scan({
+    TableName: USER_DETAILS_TABLE,
+    FilterExpression: "googleSub = :googleSub OR email = :email",
+    ExpressionAttributeValues: {
+      ":googleSub": googleSub,
+      ":email": email,
+    },
+  }).promise();
+
+  const items = result.Items || [];
+  return (
+    items.find((item) => String(item.googleSub || "") === googleSub) ||
+    items.find((item) => String(item.email || "").toLowerCase() === email) ||
+    null
+  );
+}
+
+async function updateGoogleLink(username, profile, now) {
+  await ddb.update({
+    TableName: USER_DETAILS_TABLE,
+    Key: { username },
+    UpdateExpression: [
+      "SET googleSub = :googleSub",
+      "googleEmail = :googleEmail",
+      "emailVerified = :emailVerified",
+      "authProvider = if_not_exists(authProvider, :authProvider)",
+      "lastLoginAt = :lastLoginAt",
+    ].join(", "),
+    ExpressionAttributeValues: {
+      ":googleSub": profile.sub,
+      ":googleEmail": profile.email,
+      ":emailVerified": Boolean(profile.email_verified),
+      ":authProvider": "google",
+      ":lastLoginAt": now,
+    },
+  }).promise();
+}
+
+async function findOrCreateGoogleUser(profile) {
+  const now = new Date().toISOString();
+  const existing = await findUserDetailsByGoogleProfile(profile);
+
+  if (existing?.username) {
+    await updateGoogleLink(existing.username, profile, now);
+    return existing.username;
+  }
+
+  const username = await createUniqueGoogleUsername(profile.email);
+  const name = String(profile.name || profile.email || username).trim();
+
+  await ddb.put({
+    TableName: USERS_TABLE,
+    Item: {
+      username,
+      authProvider: "google",
+      googleSub: profile.sub,
+      createdAt: now,
+    },
+    ConditionExpression: "attribute_not_exists(username)",
+  }).promise();
+
+  await ddb.put({
+    TableName: USER_DETAILS_TABLE,
+    Item: {
+      username,
+      name,
+      email: String(profile.email || "").trim().toLowerCase(),
+      phone: "",
+      role: "both",
+      mode: "player",
+      authProvider: "google",
+      googleSub: profile.sub,
+      googleEmail: String(profile.email || "").trim().toLowerCase(),
+      emailVerified: Boolean(profile.email_verified),
+      photoUrl: profile.picture || null,
+      createdAt: now,
+      lastLoginAt: now,
+    },
+  }).promise();
+
+  return username;
 }
 
 // Middleware
@@ -310,26 +488,118 @@ app.post("/api/login", async (req, res) => {
       return res.status(401).json({ message: "Invalid credentials" });
     }
 
+    if (!result.Item.passwordHash) {
+      return res.status(401).json({ message: "Use Google login for this account" });
+    }
+
     const isMatch = await bcrypt.compare(password, result.Item.passwordHash);
 
     if (!isMatch) {
       return res.status(401).json({ message: "Invalid credentials" });
     }
 
-	const token = jwt.sign(
-  	{
-    	username: normalizedUsername
-  	},
-  	JWT_SECRET,
-  	{ expiresIn: "7d" }
-	);
-
+    const token = createAuthToken(normalizedUsername);
 
     res.json({ token });
 
   } catch (err) {
     console.error("Login error:", err);
     res.status(500).json({ message: "Server error" });
+  }
+});
+
+app.get("/api/auth/google/config", (req, res) => {
+  res.json({
+    enabled: Boolean(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET),
+  });
+});
+
+app.get("/api/auth/google", (req, res) => {
+  if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
+    return redirectGoogleResult(res, {
+      google_error: "Google login is not configured yet.",
+    });
+  }
+
+  const authUrl = new URL("https://accounts.google.com/o/oauth2/v2/auth");
+  authUrl.searchParams.set("client_id", GOOGLE_CLIENT_ID);
+  authUrl.searchParams.set("redirect_uri", getGoogleRedirectUri(req));
+  authUrl.searchParams.set("response_type", "code");
+  authUrl.searchParams.set("scope", GOOGLE_OAUTH_SCOPE);
+  authUrl.searchParams.set("state", signState({
+    createdAt: Date.now(),
+    next: getSafeNextPath(req.query.next),
+  }));
+  authUrl.searchParams.set("prompt", "select_account");
+
+  return res.redirect(authUrl.toString());
+});
+
+app.get("/api/auth/google/callback", async (req, res) => {
+  try {
+    if (req.query.error) {
+      return redirectGoogleResult(res, {
+        google_error: "Google login was cancelled.",
+      });
+    }
+
+    const code = String(req.query.code || "");
+    const state = verifyState(req.query.state);
+
+    if (!code || !state) {
+      return redirectGoogleResult(res, {
+        google_error: "Google login could not be verified.",
+      });
+    }
+
+    const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        code,
+        client_id: GOOGLE_CLIENT_ID,
+        client_secret: GOOGLE_CLIENT_SECRET,
+        redirect_uri: getGoogleRedirectUri(req),
+        grant_type: "authorization_code",
+      }),
+    });
+
+    const tokenPayload = await tokenResponse.json();
+    if (!tokenResponse.ok || !tokenPayload.access_token) {
+      console.error("Google token exchange failed:", tokenPayload);
+      return redirectGoogleResult(res, {
+        google_error: "Google login failed during token exchange.",
+      });
+    }
+
+    const profileResponse = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
+      headers: {
+        Authorization: `Bearer ${tokenPayload.access_token}`,
+      },
+    });
+
+    const profile = await profileResponse.json();
+    if (!profileResponse.ok || !profile.sub || !profile.email || profile.email_verified === false) {
+      console.error("Google profile fetch failed:", profile);
+      return redirectGoogleResult(res, {
+        google_error: "Google account email could not be verified.",
+      });
+    }
+
+    const username = await findOrCreateGoogleUser({
+      ...profile,
+      email: String(profile.email || "").trim().toLowerCase(),
+    });
+
+    return redirectGoogleResult(res, {
+      google_token: createAuthToken(username),
+      next: state.next || "",
+    });
+  } catch (err) {
+    console.error("Google login callback error:", err);
+    return redirectGoogleResult(res, {
+      google_error: "Google login failed. Please try again.",
+    });
   }
 });
 
@@ -391,5 +661,3 @@ app.post("/api/user/mode", authMiddleware, async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 });
-
-

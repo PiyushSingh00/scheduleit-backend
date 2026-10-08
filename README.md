@@ -17,6 +17,24 @@ npm run check
 - Health check: `/api/health`
 - AWS region: `eu-north-1`
 
+## Google Login
+
+Create an OAuth 2.0 Web application in Google Cloud Console and add this authorized redirect URI:
+
+```text
+https://scheduleit.co.in/api/auth/google/callback
+```
+
+Set these environment variables on the EC2 PM2 process:
+
+```bash
+GOOGLE_CLIENT_ID=...
+GOOGLE_CLIENT_SECRET=...
+PUBLIC_BASE_URL=https://scheduleit.co.in
+```
+
+`GOOGLE_REDIRECT_URI` is optional. Set it only if the callback path must differ from `PUBLIC_BASE_URL + /api/auth/google/callback`.
+
 ## Production Notes
 
 The production EC2 instance should use an IAM instance profile with DynamoDB access. Do not store AWS access keys on the server.
