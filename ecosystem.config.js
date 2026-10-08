@@ -11,9 +11,8 @@ module.exports = {
       name: "scheduleit-staging",
       script: "./app.js",
       env: {
-        PORT: 5000
+        PORT: 4001
       }
     }
   ]
 };
-
